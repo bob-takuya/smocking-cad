@@ -2,7 +2,7 @@
  * Inverse Design Optimization Module
  * Based on "Fabric Tessellation: Realizing Freeform Surfaces by Smocking" (Segall et al., ACM TOG 2024)
  *
- * Implements the optimization: Y° = argmin ws·Eshape + wp·Epleat + wc·Eseam
+ * Implements the optimization: Y = argmin ws*Eshape + wp*Epleat + wc*Eseam
  */
 
 import type {
@@ -12,7 +12,7 @@ import type {
   OptimizationParams,
   OptimizationResult,
 } from '../types';
-import { computeTangramForEta } from './tangram';
+import { computeTangramForGary } from './tangram';
 
 /**
  * Compute shape energy Eshape
@@ -24,7 +24,8 @@ export function computeEshape(
   _targetMesh: Mesh3D,
   tiledPattern: TiledPattern
 ): number {
-  const { vertices2D, openVertices } = tangram;
+  const { vertices2D } = tangram;
+  const openVertices = tiledPattern.tangram.vertices; // Original open positions
   let energy = 0;
   let count = 0;
 
@@ -36,15 +37,19 @@ export function computeEshape(
     const b = edge.b;
 
     // Open (reference) edge length
-    const [oax, oay] = openVertices[a];
-    const [obx, oby] = openVertices[b];
+    const oax = openVertices[a * 2];
+    const oay = openVertices[a * 2 + 1];
+    const obx = openVertices[b * 2];
+    const oby = openVertices[b * 2 + 1];
     const openLen = Math.sqrt((obx - oax) ** 2 + (oby - oay) ** 2);
 
     if (openLen < 1e-10) continue;
 
     // Current edge length
-    const [cax, cay] = vertices2D[a];
-    const [cbx, cby] = vertices2D[b];
+    const cax = vertices2D[a * 2];
+    const cay = vertices2D[a * 2 + 1];
+    const cbx = vertices2D[b * 2];
+    const cby = vertices2D[b * 2 + 1];
     const currentLen = Math.sqrt((cbx - cax) ** 2 + (cby - cay) ** 2);
 
     // Target ratio (for now, assume uniform scaling to 0.8 of open)
@@ -86,9 +91,12 @@ export function computeEpleat(
       const curr = verts[i];
       const next = verts[(i + 1) % verts.length];
 
-      const [px, py] = vertices2D[prev];
-      const [cx, cy] = vertices2D[curr];
-      const [nx, ny] = vertices2D[next];
+      const px = vertices2D[prev * 2];
+      const py = vertices2D[prev * 2 + 1];
+      const cx = vertices2D[curr * 2];
+      const cy = vertices2D[curr * 2 + 1];
+      const nx = vertices2D[next * 2];
+      const ny = vertices2D[next * 2 + 1];
 
       // Vectors from current to neighbors
       const v1x = px - cx, v1y = py - cy;
@@ -130,8 +138,10 @@ export function computeEseam(
     const a = edge.a;
     const b = edge.b;
 
-    const [ax, ay] = vertices2D[a];
-    const [bx, by] = vertices2D[b];
+    const ax = vertices2D[a * 2];
+    const ay = vertices2D[a * 2 + 1];
+    const bx = vertices2D[b * 2];
+    const by = vertices2D[b * 2 + 1];
 
     // Seam edges should maintain consistent length
     // (In full implementation, would compare to matching edge on other side)
@@ -174,29 +184,27 @@ function computeGradient(
   targetMesh: Mesh3D,
   tiledPattern: TiledPattern,
   params: OptimizationParams
-): [number, number][] {
+): Float64Array {
   const h = 1e-6; // Step size for finite differences
-  const n = tangram.vertices2D.length;
-  const gradient: [number, number][] = new Array(n);
+  const n = tangram.vertices2D.length / 2;
+  const gradient = new Float64Array(n * 2);
 
   const baseEnergy = computeTotalEnergy(tangram, targetMesh, tiledPattern, params).total;
 
   for (let i = 0; i < n; i++) {
     // Gradient for x
-    const originalX = tangram.vertices2D[i][0];
-    tangram.vertices2D[i][0] = originalX + h;
+    const originalX = tangram.vertices2D[i * 2];
+    tangram.vertices2D[i * 2] = originalX + h;
     const energyPlusX = computeTotalEnergy(tangram, targetMesh, tiledPattern, params).total;
-    tangram.vertices2D[i][0] = originalX;
-    const dEdx = (energyPlusX - baseEnergy) / h;
+    tangram.vertices2D[i * 2] = originalX;
+    gradient[i * 2] = (energyPlusX - baseEnergy) / h;
 
     // Gradient for y
-    const originalY = tangram.vertices2D[i][1];
-    tangram.vertices2D[i][1] = originalY + h;
+    const originalY = tangram.vertices2D[i * 2 + 1];
+    tangram.vertices2D[i * 2 + 1] = originalY + h;
     const energyPlusY = computeTotalEnergy(tangram, targetMesh, tiledPattern, params).total;
-    tangram.vertices2D[i][1] = originalY;
-    const dEdy = (energyPlusY - baseEnergy) / h;
-
-    gradient[i] = [dEdx, dEdy];
+    tangram.vertices2D[i * 2 + 1] = originalY;
+    gradient[i * 2 + 1] = (energyPlusY - baseEnergy) / h;
   }
 
   return gradient;
@@ -211,8 +219,8 @@ export async function runOptimization(
   params: OptimizationParams,
   onProgress?: (iter: number, Eshape: number, Epleat: number) => void
 ): Promise<OptimizationResult> {
-  // Initialize tangram at given eta
-  let tangram = computeTangramForEta(tiledPattern, params.etaInitial);
+  // Initialize tangram at given gary value
+  let tangram = computeTangramForGary(tiledPattern, params.etaInitial);
 
   const maxIter = params.maxIterations;
   const threshold = params.convergenceThreshold;
@@ -246,8 +254,7 @@ export async function runOptimization(
     // Update positions (gradient descent with adaptive step size)
     const stepSize = 0.01;
     for (let i = 0; i < tangram.vertices2D.length; i++) {
-      tangram.vertices2D[i][0] -= stepSize * gradient[i][0];
-      tangram.vertices2D[i][1] -= stepSize * gradient[i][1];
+      tangram.vertices2D[i] -= stepSize * gradient[i];
     }
 
     // Dynamic wp scheduling: decay by 20% per iteration
@@ -325,7 +332,7 @@ export function evaluateFabricability(
 }
 
 /**
- * Check Poincaré-Hopf theorem for singularities
+ * Check Poincare-Hopf theorem for singularities
  * Sum of singularity indices should equal Euler characteristic
  */
 export function checkPoincareHopf(

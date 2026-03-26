@@ -1,17 +1,121 @@
 /**
- * ARAP (As-Rigid-As-Possible) Preview Mesh Deformation
- * Deforms a high-resolution mesh to match the tangram transformation
+ * Simple 3D Preview for Smocked Tangram
+ * Creates a 3D visualization where pleat faces fold up proportionally to (1-gary)
+ *
+ * This is a simplified visualization - not the full ARAP deformation from the paper.
  */
 
 import type { Mesh3D, TangramState, TiledPattern } from '../types';
 
 /**
- * Compute ARAP deformation from open tangram to closed tangram state
- * Projects the deformation onto a higher-resolution preview mesh
+ * Generate a 3D preview mesh from the tangram
+ * - Underlay faces lie flat on the XY plane
+ * - Pleat faces are lifted up proportionally to (1-gary) and face area
+ */
+export function generate3DPreview(
+  tiledPattern: TiledPattern,
+  tangramState: TangramState
+): Mesh3D {
+  const { tangram, faces } = tiledPattern;
+  const { vertices2D, gary } = tangramState;
+
+  const numVerts = tangram.nx * tangram.ny;
+  const numFaces = faces.length;
+
+  // Create 3D vertex positions
+  const vertices3D = new Float32Array(numVerts * 3);
+
+  // Compute pleat heights based on MVC and gary
+  const pleatHeight = (1 - gary) * 0.5; // Maximum pleat height
+
+  // First, place all vertices flat
+  for (let i = 0; i < numVerts; i++) {
+    vertices3D[i * 3] = vertices2D[i * 2];       // x
+    vertices3D[i * 3 + 1] = 0;                    // y (height)
+    vertices3D[i * 3 + 2] = vertices2D[i * 2 + 1]; // z (was y in 2D)
+  }
+
+  // Lift pleat vertices based on surrounding pleat faces
+  const vertexPleatCount = new Float32Array(numVerts);
+  const vertexHeight = new Float32Array(numVerts);
+
+  // Compute face areas and accumulate pleat contribution to vertices
+  for (let f = 0; f < numFaces; f++) {
+    const face = faces[f];
+    const isPleat = face.type === 'pleat';
+
+    if (!isPleat) continue;
+
+    const v0 = face.vertices[0];
+    const v1 = face.vertices[1];
+    const v2 = face.vertices[2];
+
+    // Compute face area in 2D
+    const ax = vertices2D[v0 * 2];
+    const ay = vertices2D[v0 * 2 + 1];
+    const bx = vertices2D[v1 * 2];
+    const by = vertices2D[v1 * 2 + 1];
+    const cx = vertices2D[v2 * 2];
+    const cy = vertices2D[v2 * 2 + 1];
+
+    const area = Math.abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)) / 2;
+
+    // Lift vertices of pleat faces
+    const lift = pleatHeight * Math.sqrt(area);
+
+    for (const v of face.vertices) {
+      vertexPleatCount[v] += 1;
+      vertexHeight[v] += lift;
+    }
+  }
+
+  // Apply averaged height to pleat vertices
+  for (let i = 0; i < numVerts; i++) {
+    if (vertexPleatCount[i] > 0) {
+      vertices3D[i * 3 + 1] = vertexHeight[i] / vertexPleatCount[i];
+    }
+  }
+
+  // Build face indices
+  const faceIndices = new Uint32Array(numFaces * 3);
+  for (let f = 0; f < numFaces; f++) {
+    const face = faces[f];
+    faceIndices[f * 3] = face.vertices[0];
+    faceIndices[f * 3 + 1] = face.vertices[1];
+    faceIndices[f * 3 + 2] = face.vertices[2];
+  }
+
+  // Compute normals
+  const normals = computeNormals(vertices3D, faceIndices);
+
+  return {
+    vertices: vertices3D,
+    faces: faceIndices,
+    normals,
+  };
+}
+
+/**
+ * Generate smocked preview mesh combining target shape with tangram deformation
+ */
+export function generateSmockedPreview(
+  _targetMesh: Mesh3D,
+  tangram: TangramState,
+  tiledPattern: TiledPattern,
+  _pleatHeight: number = 0.1
+): Mesh3D {
+  // For now, just return a simple 3D preview of the tangram
+  // A full implementation would project the tangram onto the target surface
+  return generate3DPreview(tiledPattern, tangram);
+}
+
+/**
+ * Compute ARAP preview (simplified version)
+ * Projects tangram deformation onto a high-res mesh
  */
 export function computeARAPPreview(
   openTangram: TangramState,
-  _closedTangram: TangramState,
+  closedTangram: TangramState,
   highResMesh: Mesh3D
 ): Mesh3D {
   const { vertices, faces, normals } = highResMesh;
@@ -24,23 +128,18 @@ export function computeARAPPreview(
   // Compute bounding box of open tangram for normalization
   const tangramBounds = computeTangramBounds(openTangram);
 
-  // For each mesh vertex, find its barycentric coordinates in the tangram
-  // and apply the corresponding deformation
+  // For each mesh vertex, apply deformation based on tangram
   for (let i = 0; i < numVerts; i++) {
     const vx = vertices[i * 3];
     const vy = vertices[i * 3 + 1];
     const vz = vertices[i * 3 + 2];
 
     // Project 3D point to 2D tangram space (use XZ plane projection)
-    // Normalize to tangram coordinate system
     const tx = (vx - tangramBounds.minX) / tangramBounds.width;
     const ty = (vz - tangramBounds.minY) / tangramBounds.height;
 
     // Interpolate deformation from tangram
-    const deformation = interpolateDeformation(
-      tx, ty,
-      openTangram
-    );
+    const deformation = interpolateDeformation(tx, ty, openTangram, closedTangram);
 
     // Apply deformation
     deformedVerts[i * 3] = vx + deformation.dx;
@@ -48,9 +147,10 @@ export function computeARAPPreview(
     deformedVerts[i * 3 + 2] = vz + deformation.dz;
   }
 
-  // Recompute normals for the deformed mesh
+  // Recompute normals
   if (deformedNormals) {
-    computeNormals(deformedVerts, faces, deformedNormals);
+    const computed = computeNormals(deformedVerts, faces);
+    deformedNormals.set(computed);
   }
 
   return {
@@ -71,10 +171,15 @@ function computeTangramBounds(tangram: TangramState): {
   width: number;
   height: number;
 } {
+  const vertices2D = tangram.vertices2D;
+  const numVerts = vertices2D.length / 2;
+
   let minX = Infinity, maxX = -Infinity;
   let minY = Infinity, maxY = -Infinity;
 
-  for (const [x, y] of tangram.vertices2D) {
+  for (let i = 0; i < numVerts; i++) {
+    const x = vertices2D[i * 2];
+    const y = vertices2D[i * 2 + 1];
     minX = Math.min(minX, x);
     maxX = Math.max(maxX, x);
     minY = Math.min(minY, y);
@@ -90,37 +195,42 @@ function computeTangramBounds(tangram: TangramState): {
 
 /**
  * Interpolate deformation at a point based on tangram vertices
- * Uses inverse distance weighting for smooth interpolation
  */
 function interpolateDeformation(
   tx: number,
   ty: number,
-  openTangram: TangramState
+  openTangram: TangramState,
+  closedTangram: TangramState
 ): { dx: number; dy: number; dz: number } {
-  const { openVertices, closedVertices } = openTangram;
-  const n = openVertices.length;
+  const openVerts = openTangram.vertices2D;
+  const closedVerts = closedTangram.vertices2D;
+  const numVerts = openVerts.length / 2;
 
   // Compute inverse distance weights
   let totalWeight = 0;
   let dx = 0, dy = 0, dz = 0;
 
-  for (let i = 0; i < n; i++) {
-    const [ox, oy] = openVertices[i];
-    const [cx, cy] = closedVertices[i];
+  // Get bounding info for scaling
+  const bounds = computeTangramBounds(openTangram);
+
+  for (let i = 0; i < numVerts; i++) {
+    const ox = openVerts[i * 2];
+    const oy = openVerts[i * 2 + 1];
+    const cx = closedVerts[i * 2];
+    const cy = closedVerts[i * 2 + 1];
 
     // Distance from query point to this tangram vertex (in normalized coords)
-    const dist = Math.sqrt(
-      (tx * (openTangram.vertices2D[n - 1]?.[0] ?? 1) - ox) ** 2 +
-      (ty * (openTangram.vertices2D[n - 1]?.[1] ?? 1) - oy) ** 2
-    );
+    const qx = tx * bounds.width + bounds.minX;
+    const qy = ty * bounds.height + bounds.minY;
+    const dist = Math.sqrt((qx - ox) ** 2 + (qy - oy) ** 2);
 
-    // Inverse distance weight with small epsilon to avoid division by zero
-    const weight = 1 / (dist + 0.01);
+    // Inverse distance weight
+    const weight = 1 / (dist + 0.1);
     totalWeight += weight;
 
     // Displacement from open to closed position
-    const localDx = (cx - ox) * 0.1; // Scale down deformation
-    const localDy = 0; // Keep Y (height) unchanged
+    const localDx = (cx - ox) * 0.1;
+    const localDy = 0;
     const localDz = (cy - oy) * 0.1;
 
     dx += weight * localDx;
@@ -138,18 +248,12 @@ function interpolateDeformation(
 }
 
 /**
- * Compute vertex normals from face normals
+ * Compute vertex normals from faces
  */
-function computeNormals(
-  vertices: Float32Array,
-  faces: Uint32Array,
-  normals: Float32Array
-): void {
+function computeNormals(vertices: Float32Array, faces: Uint32Array): Float32Array {
   const numVerts = vertices.length / 3;
   const numFaces = faces.length / 3;
-
-  // Reset normals
-  normals.fill(0);
+  const normals = new Float32Array(numVerts * 3);
 
   // Accumulate face normals at each vertex
   for (let f = 0; f < numFaces; f++) {
@@ -192,61 +296,12 @@ function computeNormals(
     normals[i * 3 + 1] = ny / len;
     normals[i * 3 + 2] = nz / len;
   }
+
+  return normals;
 }
 
 /**
- * Generate a preview mesh showing the smocked result
- * Combines the target shape with pleat geometry
- */
-export function generateSmockedPreview(
-  targetMesh: Mesh3D,
-  tangram: TangramState,
-  _tiledPattern: TiledPattern,
-  pleatHeight: number = 0.1
-): Mesh3D {
-  const { vertices, faces, normals } = targetMesh;
-  const numVerts = vertices.length / 3;
-
-  // Create output arrays with extra vertices for pleats
-  const newVerts: number[] = [];
-  const newFaces: number[] = [];
-  const newNormals: number[] = [];
-
-  // Copy original vertices with slight displacement based on eta
-  for (let i = 0; i < numVerts; i++) {
-    const vx = vertices[i * 3];
-    const vy = vertices[i * 3 + 1];
-    const vz = vertices[i * 3 + 2];
-
-    const nx = normals ? normals[i * 3] : 0;
-    const ny = normals ? normals[i * 3 + 1] : 1;
-    const nz = normals ? normals[i * 3 + 2] : 0;
-
-    // Displace vertex along normal based on pleat height (simulating fabric bunching)
-    const displacement = pleatHeight * (1 - tangram.eta) * Math.random() * 0.5;
-
-    newVerts.push(vx + nx * displacement);
-    newVerts.push(vy + ny * displacement);
-    newVerts.push(vz + nz * displacement);
-
-    newNormals.push(nx, ny, nz);
-  }
-
-  // Copy original faces
-  for (let i = 0; i < faces.length; i++) {
-    newFaces.push(faces[i]);
-  }
-
-  return {
-    vertices: new Float32Array(newVerts),
-    faces: new Uint32Array(newFaces),
-    normals: new Float32Array(newNormals),
-  };
-}
-
-/**
- * Local-global ARAP iteration step
- * For full implementation of ARAP deformation
+ * ARAP iteration step (simplified)
  */
 export function arapIteration(
   currentVerts: Float32Array,
@@ -257,21 +312,18 @@ export function arapIteration(
   const numVerts = currentVerts.length / 3;
   const newVerts = new Float32Array(currentVerts);
 
-  // Build cotangent Laplacian matrix (simplified version)
-  const weights: number[][] = Array.from({ length: numVerts }, () => []);
+  // Build neighbor information
   const neighbors: number[][] = Array.from({ length: numVerts }, () => []);
-
-  // Collect edge weights from faces
   const numFaces = faces.length / 3;
+
   for (let f = 0; f < numFaces; f++) {
     const ia = faces[f * 3];
     const ib = faces[f * 3 + 1];
     const ic = faces[f * 3 + 2];
 
-    // Add uniform weights for simplicity (would use cotangent weights in full implementation)
-    addNeighbor(neighbors, weights, ia, ib, 1);
-    addNeighbor(neighbors, weights, ib, ic, 1);
-    addNeighbor(neighbors, weights, ic, ia, 1);
+    addNeighbor(neighbors, ia, ib);
+    addNeighbor(neighbors, ib, ic);
+    addNeighbor(neighbors, ic, ia);
   }
 
   // Global step: solve for new vertex positions
@@ -285,27 +337,21 @@ export function arapIteration(
       continue;
     }
 
-    // Average of neighbor positions weighted by Laplacian
+    // Average of neighbor positions
     if (neighbors[i].length === 0) continue;
 
     let sumX = 0, sumY = 0, sumZ = 0;
-    let totalWeight = 0;
 
-    for (let j = 0; j < neighbors[i].length; j++) {
-      const ni = neighbors[i][j];
-      const w = weights[i][j];
-
-      sumX += w * currentVerts[ni * 3];
-      sumY += w * currentVerts[ni * 3 + 1];
-      sumZ += w * currentVerts[ni * 3 + 2];
-      totalWeight += w;
+    for (const ni of neighbors[i]) {
+      sumX += currentVerts[ni * 3];
+      sumY += currentVerts[ni * 3 + 1];
+      sumZ += currentVerts[ni * 3 + 2];
     }
 
-    if (totalWeight > 0) {
-      newVerts[i * 3] = sumX / totalWeight;
-      newVerts[i * 3 + 1] = sumY / totalWeight;
-      newVerts[i * 3 + 2] = sumZ / totalWeight;
-    }
+    const count = neighbors[i].length;
+    newVerts[i * 3] = sumX / count;
+    newVerts[i * 3 + 1] = sumY / count;
+    newVerts[i * 3 + 2] = sumZ / count;
   }
 
   return newVerts;
@@ -314,19 +360,11 @@ export function arapIteration(
 /**
  * Helper to add neighbor relationship
  */
-function addNeighbor(
-  neighbors: number[][],
-  weights: number[][],
-  i: number,
-  j: number,
-  weight: number
-): void {
+function addNeighbor(neighbors: number[][], i: number, j: number): void {
   if (!neighbors[i].includes(j)) {
     neighbors[i].push(j);
-    weights[i].push(weight);
   }
   if (!neighbors[j].includes(i)) {
     neighbors[j].push(i);
-    weights[j].push(weight);
   }
 }

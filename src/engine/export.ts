@@ -65,7 +65,8 @@ export function exportSVG(
   const tx = (v: number) => v * scale;
   const ty = (v: number) => v * scale;
   const getPos = (idx: number): [number, number] => {
-    const [x, y] = tangram.vertices2D[idx];
+    const x = tangram.vertices2D[idx * 2];
+    const y = tangram.vertices2D[idx * 2 + 1];
     return [tx(x), ty(y)];
   };
 
@@ -193,7 +194,8 @@ ENTITIES
 
   // Helper to get coordinates
   const getPos = (idx: number): [number, number] => {
-    const [x, y] = tangram.vertices2D[idx];
+    const x = tangram.vertices2D[idx * 2];
+    const y = tangram.vertices2D[idx * 2 + 1];
     return [x * scale, y * scale];
   };
 
@@ -307,7 +309,8 @@ export function exportPDF(
 
   // Helper to get transformed coordinates
   const getPos = (idx: number): [number, number] => {
-    const [x, y] = tangram.vertices2D[idx];
+    const x = tangram.vertices2D[idx * 2];
+    const y = tangram.vertices2D[idx * 2 + 1];
     return [x * scale + offsetX, y * scale + offsetY];
   };
 
@@ -489,16 +492,17 @@ export function exportSTL(mesh: Mesh3D): ArrayBuffer {
  * Export optimization result to JSON
  */
 export function exportJSON(result: OptimizationResult): string {
+  // Convert Float64Array to regular array for JSON serialization
+  const vertices2D = Array.from(result.tangramState.vertices2D);
+
   return JSON.stringify({
     pattern: result.tiledPattern.pattern.name,
     tiling: {
       uRepeat: result.tiledPattern.uRepeat,
       vRepeat: result.tiledPattern.vRepeat,
     },
-    vertices: result.tangramState.vertices2D,
-    openVertices: result.tangramState.openVertices,
-    closedVertices: result.tangramState.closedVertices,
-    eta: result.tangramState.eta,
+    vertices: vertices2D,
+    gary: result.tangramState.gary,
     energy: {
       Eshape: result.Eshape,
       Epleat: result.Epleat,
@@ -520,7 +524,7 @@ export function exportSmockProject(state: Partial<AppState>): string {
     shapeParams: state.shapeParams,
     pattern: state.selectedPattern,
     tiling: { u: state.tilingU, v: state.tilingV },
-    eta: state.eta,
+    gary: state.gary,
     optimizationParams: state.optimizationParams,
     singularityMode: state.singularityMode,
     singularities: state.singularities,
@@ -540,7 +544,7 @@ export function importSmockProject(json: string): Partial<AppState> {
     selectedPattern: data.pattern,
     tilingU: data.tiling?.u ?? 4,
     tilingV: data.tiling?.v ?? 4,
-    eta: data.eta ?? 1,
+    gary: data.gary ?? 1,
     optimizationParams: data.optimizationParams,
     singularityMode: data.singularityMode,
     singularities: data.singularities,

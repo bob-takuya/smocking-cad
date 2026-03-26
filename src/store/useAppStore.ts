@@ -24,7 +24,7 @@ import type {
 } from '../types';
 import { getDefaultShapeParams, generateMesh } from '../engine/shapes';
 import { getPattern, PATTERNS } from '../engine/patterns';
-import { generateTiledPattern, computeTangramForEta } from '../engine/tangram';
+import { generateTiledPattern, computeTangramForGary } from '../engine/tangram';
 import { getDefaultOptimizationParams } from '../engine/optimization';
 
 /**
@@ -42,8 +42,8 @@ export const useAppStore = create<AppState>((set, get) => {
   const defaultShape: ShapePreset = 'Hemisphere';
   const defaultShapeParams = getDefaultShapeParams(defaultShape);
   const defaultPattern: PatternPreset = 'Arrow';
-  const defaultTilingU = 4;
-  const defaultTilingV = 4;
+  const defaultTilingU = 3;
+  const defaultTilingV = 3;
 
   // Generate initial mesh
   const initialMesh = generateMesh(defaultShape, defaultShapeParams);
@@ -51,7 +51,7 @@ export const useAppStore = create<AppState>((set, get) => {
   // Generate initial pattern
   const patternDef = getPattern(defaultPattern);
   const initialTiledPattern = generateTiledPattern(patternDef, defaultTilingU, defaultTilingV);
-  const initialTangram = computeTangramForEta(initialTiledPattern, 1);
+  const initialTangram = computeTangramForGary(initialTiledPattern, 1);
 
   return {
     // Shape state
@@ -64,7 +64,7 @@ export const useAppStore = create<AppState>((set, get) => {
     selectedPattern: defaultPattern,
     tilingU: defaultTilingU,
     tilingV: defaultTilingV,
-    eta: 1,
+    gary: 1, // Start fully open
     tiledPattern: initialTiledPattern,
     tangramState: initialTangram,
 
@@ -123,7 +123,7 @@ export const useAppStore = create<AppState>((set, get) => {
     setSelectedPattern: (pattern: PatternPreset) => {
       const patternDef = PATTERNS[pattern];
       const tiledPattern = generateTiledPattern(patternDef, get().tilingU, get().tilingV);
-      const tangram = computeTangramForEta(tiledPattern, get().eta);
+      const tangram = computeTangramForGary(tiledPattern, get().gary);
       set({
         selectedPattern: pattern,
         tiledPattern,
@@ -134,7 +134,7 @@ export const useAppStore = create<AppState>((set, get) => {
     setTilingU: (u: number) => {
       const patternDef = PATTERNS[get().selectedPattern];
       const tiledPattern = generateTiledPattern(patternDef, u, get().tilingV);
-      const tangram = computeTangramForEta(tiledPattern, get().eta);
+      const tangram = computeTangramForGary(tiledPattern, get().gary);
       set({
         tilingU: u,
         tiledPattern,
@@ -145,7 +145,7 @@ export const useAppStore = create<AppState>((set, get) => {
     setTilingV: (v: number) => {
       const patternDef = PATTERNS[get().selectedPattern];
       const tiledPattern = generateTiledPattern(patternDef, get().tilingU, v);
-      const tangram = computeTangramForEta(tiledPattern, get().eta);
+      const tangram = computeTangramForGary(tiledPattern, get().gary);
       set({
         tilingV: v,
         tiledPattern,
@@ -153,13 +153,13 @@ export const useAppStore = create<AppState>((set, get) => {
       });
     },
 
-    setEta: (eta: number) => {
+    setGary: (gary: number) => {
       const tiledPattern = get().tiledPattern;
       if (tiledPattern) {
-        const tangram = computeTangramForEta(tiledPattern, eta);
-        set({ eta, tangramState: tangram });
+        const tangram = computeTangramForGary(tiledPattern, gary);
+        set({ gary, tangramState: tangram });
       } else {
-        set({ eta });
+        set({ gary });
       }
     },
 

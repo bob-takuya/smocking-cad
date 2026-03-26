@@ -21,40 +21,61 @@ export interface Mesh3D {
 }
 
 // ============================================================
-// Smocking Pattern Types
+// Smocking Pattern Types (based on paper)
 // ============================================================
 
+// Pattern presets from the paper
 export type PatternPreset =
   | 'Arrow'
-  | 'WaterBomb'
-  | 'Resch4'
-  | 'Braid'
   | 'Leaf'
+  | 'Braid'
   | 'Box'
   | 'Brick'
-  | 'Diamond';
+  | 'TwistedSquare'
+  | 'Heart';
 
-export type PatternSymmetry = 'N2' | 'N3' | 'N4' | 'N6';
-
-export interface SmockingPattern {
+// Pattern definition: just grid dimensions + stitching lines
+export interface SmockingPatternDef {
   name: PatternPreset;
-  symmetry: PatternSymmetry;
-  unitCell: {
-    vertices: [number, number][];      // 2D coords in unit cell
-    underlayEdges: [number, number][]; // edge indices
-    stitchingLines: number[][];        // vertex indices per stitch line
-    pleatEdges: [number, number][];    // pleat edge indices
-    underlayFaces: number[][];         // face vertex indices
-    pleatFaces: number[][];            // face vertex indices
-  };
-  tiling: { uStep: number; vStep: number };
-  closedVertices: [number, number, number][]; // 3D coords after full closing (eta=0)
+  nx: number;  // grid width (columns)
+  ny: number;  // grid height (rows)
+  stitchingLines: Array<Array<[number, number]>>;  // list of (x,y) coordinate sequences
 }
 
 // ============================================================
-// Tangram / Pattern Instance Types
+// Tangram Data Types
 // ============================================================
 
+// Mean Value Coordinates for a pleat vertex
+export interface PleatMVC {
+  pleatIndex: number;  // index of the pleat vertex
+  neighbors: Array<{ index: number; weight: number }>;  // underlay neighbors with MVC weights
+}
+
+// Tangram: the computed structure from a pattern
+export interface TangramData {
+  nx: number;
+  ny: number;
+  vertices: Float64Array;       // flat [x0,y0, x1,y1, ...] for nx*ny vertices
+  coordToSL: Int32Array;        // flat [nx*ny], -1 if pleat, >= 0 if underlay (stitch line index)
+  underlayEdges: Uint32Array;   // pairs [a, b, a, b, ...]
+  stitchingEdges: Uint32Array;  // pairs [a, b, a, b, ...]
+  faces: Uint32Array;           // triangles [a, b, c, ...]
+  faceClass: Uint8Array;        // 0=pleat, 1=underlay per triangle
+  pleatIndices: Uint32Array;    // indices of pleat vertices
+  underlayIndices: Uint32Array; // indices of underlay vertices
+  pleatMVC: PleatMVC[];         // mean value coords for each pleat vertex
+  originalLengths: Float64Array; // original edge lengths for optimization
+}
+
+// State of the tangram at a particular gary value
+export interface TangramState {
+  gary: number;  // 0 = closed, 1 = open (called eta in paper, gary in code)
+  vertices2D: Float64Array;  // current 2D positions [x0,y0, x1,y1, ...]
+  vertices3D?: Float32Array; // 3D positions (after folding)
+}
+
+// Legacy types for backward compatibility with UI
 export interface TiledVertex {
   id: number;
   x: number;
@@ -67,43 +88,27 @@ export interface TiledVertex {
 
 export interface TiledEdge {
   id: number;
-  a: number; // vertex id
-  b: number; // vertex id
+  a: number;
+  b: number;
   type: 'underlay' | 'pleat' | 'stitch' | 'seam';
 }
 
 export interface TiledFace {
   id: number;
-  vertices: number[]; // vertex ids
+  vertices: number[];
   type: 'underlay' | 'pleat';
 }
 
+// TiledPattern: UI-friendly representation of a tangram
 export interface TiledPattern {
-  pattern: SmockingPattern;
+  pattern: SmockingPatternDef;
   uRepeat: number;
   vRepeat: number;
   vertices: TiledVertex[];
   edges: TiledEdge[];
   faces: TiledFace[];
-  stitchingLines: number[][]; // arrays of vertex ids
-}
-
-export interface TangramState {
-  eta: number;  // 0 = closed, 1 = open
-  vertices2D: [number, number][];  // current 2D positions
-  vertices3D?: [number, number, number][]; // 3D positions (after optimization)
-  openVertices: [number, number][];
-  closedVertices: [number, number][];
-}
-
-export interface VertexClassification {
-  underlay: Set<number>;
-  pleat: Set<number>;
-}
-
-export interface FaceClassification {
-  underlay: Set<number>;
-  pleat: Set<number>;
+  stitchingLines: number[][];
+  tangram: TangramData;  // the underlying tangram data
 }
 
 // ============================================================
@@ -164,7 +169,7 @@ export type SingularityMode = 'auto' | 'manual' | 'none';
 export interface Singularity {
   id: string;
   position: Vec3;
-  index: number;   // Poincaré-Hopf index (+1 or -1)
+  index: number;   // Poincare-Hopf index (+1 or -1)
   type: 'source' | 'sink' | 'saddle';
 }
 
@@ -225,7 +230,7 @@ export interface AppState {
   selectedPattern: PatternPreset;
   tilingU: number;
   tilingV: number;
-  eta: number;
+  gary: number;  // 0 = closed, 1 = open
   tiledPattern: TiledPattern | null;
   tangramState: TangramState | null;
 
@@ -260,7 +265,7 @@ export interface AppState {
   setSelectedPattern: (pattern: PatternPreset) => void;
   setTilingU: (u: number) => void;
   setTilingV: (v: number) => void;
-  setEta: (eta: number) => void;
+  setGary: (gary: number) => void;
   setTiledPattern: (p: TiledPattern | null) => void;
   setTangramState: (s: TangramState | null) => void;
   setOptimizationParams: (params: Partial<OptimizationParams>) => void;
