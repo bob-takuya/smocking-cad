@@ -10,6 +10,7 @@ const COLORS = {
   underlayEdge: '#F5C518',
   stitch: '#1A1A1A',
   seam: '#FF7A00',
+  stitchLine: '#FF5722',  // Prominent orange-red for stitch lines
   singularity: '#E84040',
   background: '#1E2126',
 };
@@ -121,7 +122,7 @@ export function TangramSVG({ mode }: TangramSVGProps) {
         .attr('stroke-opacity', opacity);
     }
 
-    // Draw stitching lines
+    // Draw stitching lines - these are the actual sewing lines, make them very prominent
     const stitchGroup = g.append('g').attr('class', 'stitch-lines');
 
     for (const line of tiledPattern.stitchingLines) {
@@ -131,15 +132,41 @@ export function TangramSVG({ mode }: TangramSVGProps) {
         .x((idx) => tx(idx))
         .y((idx) => ty(idx));
 
+      // Background stroke for contrast
       stitchGroup
         .append('path')
         .datum(line)
         .attr('d', lineGenerator)
         .attr('fill', 'none')
-        .attr('stroke', COLORS.stitch)
-        .attr('stroke-width', 2.5)
+        .attr('stroke', '#000000')
+        .attr('stroke-width', 5)
         .attr('stroke-linecap', 'round')
-        .attr('stroke-linejoin', 'round');
+        .attr('stroke-linejoin', 'round')
+        .attr('stroke-opacity', 0.3);
+
+      // Main prominent stitch line - thick, dashed, orange-red
+      stitchGroup
+        .append('path')
+        .datum(line)
+        .attr('d', lineGenerator)
+        .attr('fill', 'none')
+        .attr('stroke', COLORS.stitchLine)
+        .attr('stroke-width', 3.5)
+        .attr('stroke-linecap', 'round')
+        .attr('stroke-linejoin', 'round')
+        .attr('stroke-dasharray', '8,4');
+
+      // Draw stitch points as larger circles
+      for (const idx of line) {
+        stitchGroup
+          .append('circle')
+          .attr('cx', tx(idx))
+          .attr('cy', ty(idx))
+          .attr('r', 4)
+          .attr('fill', COLORS.stitchLine)
+          .attr('stroke', 'white')
+          .attr('stroke-width', 1.5);
+      }
     }
 
     // Draw vertices as small circles

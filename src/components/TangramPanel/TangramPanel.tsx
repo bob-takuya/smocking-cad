@@ -1,38 +1,17 @@
-import { useState } from 'react';
 import { useAppStore } from '../../store/useAppStore';
 import { Panel, Slider } from '../ui';
 import { TangramSVG } from './TangramSVG';
 import { EtaSlider } from './EtaSlider';
 import { PatternLibrary } from './PatternLibrary';
 
-type ViewMode = 'dual' | 'open' | 'closed' | 'current';
-
 export function TangramPanel() {
-  const [viewMode, setViewMode] = useState<ViewMode>('dual');
-  const { tilingU, tilingV, setTilingU, setTilingV, selectedPattern } = useAppStore();
+  const { tilingU, tilingV, setTilingU, setTilingV, selectedPattern, gary } = useAppStore();
 
   return (
     <Panel
       title={`Tangram - ${selectedPattern}`}
       noPadding
       className="h-full"
-      headerActions={
-        <div className="flex gap-1">
-          {(['dual', 'open', 'closed', 'current'] as ViewMode[]).map((mode) => (
-            <button
-              key={mode}
-              onClick={() => setViewMode(mode)}
-              className={`px-2 py-0.5 text-[10px] rounded transition-colors ${
-                viewMode === mode
-                  ? 'bg-[var(--accent)] text-white'
-                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-              }`}
-            >
-              {mode.charAt(0).toUpperCase() + mode.slice(1)}
-            </button>
-          ))}
-        </div>
-      }
     >
       <div className="flex flex-col h-full">
         {/* Pattern Library (collapsible) */}
@@ -62,28 +41,28 @@ export function TangramPanel() {
           />
         </div>
 
-        {/* SVG Viewer(s) */}
-        <div className="flex-1 flex overflow-hidden">
-          {viewMode === 'dual' ? (
-            <>
-              <div className="flex-1 border-r border-[var(--border)] relative">
-                <div className="absolute top-2 left-2 px-2 py-0.5 bg-[var(--bg-panel)]/80 rounded text-[10px] text-[var(--text-secondary)] z-10">
-                  Open ({'\u03B7'}=1)
-                </div>
-                <TangramSVG mode="open" />
-              </div>
-              <div className="flex-1 relative">
-                <div className="absolute top-2 left-2 px-2 py-0.5 bg-[var(--bg-panel)]/80 rounded text-[10px] text-[var(--text-secondary)] z-10">
-                  Closed ({'\u03B7'}=0)
-                </div>
-                <TangramSVG mode="closed" />
-              </div>
-            </>
-          ) : (
-            <div className="flex-1">
-              <TangramSVG mode={viewMode === 'current' ? 'current' : viewMode} />
+        {/* Single SVG Viewer with live η animation */}
+        <div className="flex-1 relative overflow-hidden">
+          {/* Main live view driven by slider */}
+          <TangramSVG mode="current" />
+
+          {/* Current η value overlay */}
+          <div className="absolute top-2 right-2 px-2 py-1 bg-[var(--bg-panel)]/90 rounded text-xs z-10">
+            <span className="mono text-[var(--text-primary)] tabular-nums font-medium">
+              η = {gary.toFixed(2)}
+            </span>
+            <span className="text-[var(--text-muted)] ml-2">
+              {gary >= 0.9 ? '(Open)' : gary <= 0.1 ? '(Closed)' : ''}
+            </span>
+          </div>
+
+          {/* Small reference thumbnail showing Open state */}
+          <div className="absolute top-2 left-2 w-20 h-20 border border-[var(--border)] rounded overflow-hidden bg-[var(--bg-panel)]/90 z-10">
+            <div className="absolute top-0.5 left-0.5 px-1 text-[8px] text-[var(--text-muted)] bg-[var(--bg-panel)]/80 rounded">
+              Open (η=1)
             </div>
-          )}
+            <TangramSVG mode="open" />
+          </div>
         </div>
 
         {/* Eta Slider */}
@@ -101,12 +80,8 @@ export function TangramPanel() {
               <span className="text-[var(--text-secondary)]">Pleat</span>
             </div>
             <div className="flex items-center gap-1">
-              <div className="w-6 h-0.5" style={{ backgroundColor: '#F5C518' }} />
-              <span className="text-[var(--text-secondary)]">Underlay Edge</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <div className="w-6 h-0.5" style={{ backgroundColor: '#1A1A1A' }} />
-              <span className="text-[var(--text-secondary)]">Stitch</span>
+              <div className="w-6 h-1 rounded" style={{ backgroundColor: '#FF5722', border: '1px dashed #FF5722' }} />
+              <span className="text-[var(--text-secondary)]">Stitch Line</span>
             </div>
             <div className="flex items-center gap-1">
               <div className="w-3 h-3 rounded-full" style={{ backgroundColor: '#E84040' }} />

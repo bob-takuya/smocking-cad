@@ -1,88 +1,145 @@
 /**
- * Simple 3D Preview for Smocked Tangram
+ * 3D Preview for Smocked Tangram
  * Creates a 3D visualization where pleat faces fold up proportionally to (1-gary)
  *
- * This is a simplified visualization - not the full ARAP deformation from the paper.
+ * Based on the forward problem: given a tangram at a gary value, generate a 3D mesh where:
+ * - Underlay faces lie relatively flat on the base plane
+ * - Pleat faces fold up perpendicular to the fabric surface
+ * - The height of pleats is proportional to (1 - gary) * edge_length
  */
 
 import type { Mesh3D, TangramState, TiledPattern } from '../types';
 
+// Face type enum for colors
+export const FACE_TYPE_UNDERLAY = 1;
+export const FACE_TYPE_PLEAT = 0;
+
+/**
+ * Extended Mesh3D with face type information for coloring
+ */
+export interface ColoredMesh3D extends Mesh3D {
+  faceTypes: Uint8Array;  // 0 = pleat, 1 = underlay per face
+}
+
 /**
  * Generate a 3D preview mesh from the tangram
- * - Underlay faces lie flat on the XY plane
- * - Pleat faces are lifted up proportionally to (1-gary) and face area
+ * - Underlay faces lie flat on the z=0 plane using their 2D (x,y) positions
+ * - Pleat faces are lifted upward (z direction) proportional to (1-gary) * edge_length
  */
 export function generate3DPreview(
   tiledPattern: TiledPattern,
   tangramState: TangramState
-): Mesh3D {
+): ColoredMesh3D {
   const { tangram, faces } = tiledPattern;
   const { vertices2D, gary } = tangramState;
 
   const numVerts = tangram.nx * tangram.ny;
   const numFaces = faces.length;
 
-  // Create 3D vertex positions
+  // Compute average edge length for scaling pleat height
+  let totalEdgeLength = 0;
+  let edgeCount = 0;
+  for (let i = 0; i < tangram.underlayEdges.length; i += 2) {
+    const a = tangram.underlayEdges[i];
+    const b = tangram.underlayEdges[i + 1];
+    const dx = vertices2D[b * 2] - vertices2D[a * 2];
+    const dy = vertices2D[b * 2 + 1] - vertices2D[a * 2 + 1];
+    totalEdgeLength += Math.sqrt(dx * dx + dy * dy);
+    edgeCount++;
+  }
+  const avgEdgeLength = edgeCount > 0 ? totalEdgeLength / edgeCount : 1;
+
+  // Pleat height is proportional to (1 - gary) and average edge length
+  // When gary=0 (fully closed), pleats are at maximum height
+  // When gary=1 (fully open), pleats are flat
+  const maxPleatHeight = avgEdgeLength * 0.8;
+  const pleatFactor = 1 - gary;
+
+  // Create 3D vertex positions - initially all flat
   const vertices3D = new Float32Array(numVerts * 3);
-
-  // Compute pleat heights based on MVC and gary
-  const pleatHeight = (1 - gary) * 0.5; // Maximum pleat height
-
-  // First, place all vertices flat
   for (let i = 0; i < numVerts; i++) {
     vertices3D[i * 3] = vertices2D[i * 2];       // x
     vertices3D[i * 3 + 1] = 0;                    // y (height)
     vertices3D[i * 3 + 2] = vertices2D[i * 2 + 1]; // z (was y in 2D)
   }
 
-  // Lift pleat vertices based on surrounding pleat faces
-  const vertexPleatCount = new Float32Array(numVerts);
-  const vertexHeight = new Float32Array(numVerts);
+  // Compute which vertices are in pleat faces only (not shared with underlay)
+  const vertexInPleat = new Uint8Array(numVerts);
+  const vertexInUnderlay = new Uint8Array(numVerts);
 
-  // Compute face areas and accumulate pleat contribution to vertices
-  for (let f = 0; f < numFaces; f++) {
-    const face = faces[f];
-    const isPleat = face.type === 'pleat';
+  for (const face of faces) {
+    if (face.type === 'pleat') {
+      for (const v of face.vertices) {
+        vertexInPleat[v] = 1;
+      }
+    } else {
+      for (const v of face.vertices) {
+        vertexInUnderlay[v] = 1;
+      }
+    }
+  }
 
-    if (!isPleat) continue;
+  // For each pleat face, compute its lift based on adjacent underlay faces
+  const vertexLift = new Float32Array(numVerts);
+  const vertexLiftCount = new Float32Array(numVerts);
 
+  for (const face of faces) {
+    if (face.type !== 'pleat') continue;
+
+    // Find the centroid of this pleat face
+    let cx = 0, cy = 0;
+    for (const v of face.vertices) {
+      cx += vertices2D[v * 2];
+      cy += vertices2D[v * 2 + 1];
+    }
+    cx /= face.vertices.length;
+    cy /= face.vertices.length;
+
+    // Compute the "folding height" for this face
+    // Use the face's area as a factor - larger pleats fold higher
     const v0 = face.vertices[0];
     const v1 = face.vertices[1];
     const v2 = face.vertices[2];
+    const ax = vertices2D[v0 * 2], ay = vertices2D[v0 * 2 + 1];
+    const bx = vertices2D[v1 * 2], by = vertices2D[v1 * 2 + 1];
+    const ccx = vertices2D[v2 * 2], ccy = vertices2D[v2 * 2 + 1];
+    const area = Math.abs((bx - ax) * (ccy - ay) - (ccx - ax) * (by - ay)) / 2;
 
-    // Compute face area in 2D
-    const ax = vertices2D[v0 * 2];
-    const ay = vertices2D[v0 * 2 + 1];
-    const bx = vertices2D[v1 * 2];
-    const by = vertices2D[v1 * 2 + 1];
-    const cx = vertices2D[v2 * 2];
-    const cy = vertices2D[v2 * 2 + 1];
+    // Height proportional to sqrt(area) and pleat factor
+    const faceHeight = pleatFactor * maxPleatHeight * (0.5 + 0.5 * Math.sqrt(area / (avgEdgeLength * avgEdgeLength)));
 
-    const area = Math.abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)) / 2;
-
-    // Lift vertices of pleat faces
-    const lift = pleatHeight * Math.sqrt(area);
-
+    // Apply height to vertices of this pleat face
     for (const v of face.vertices) {
-      vertexPleatCount[v] += 1;
-      vertexHeight[v] += lift;
+      vertexLift[v] += faceHeight;
+      vertexLiftCount[v] += 1;
     }
   }
 
-  // Apply averaged height to pleat vertices
+  // Apply averaged lift to vertices
+  // Vertices shared between pleat and underlay get partial lift
   for (let i = 0; i < numVerts; i++) {
-    if (vertexPleatCount[i] > 0) {
-      vertices3D[i * 3 + 1] = vertexHeight[i] / vertexPleatCount[i];
+    if (vertexLiftCount[i] > 0) {
+      let lift = vertexLift[i] / vertexLiftCount[i];
+
+      // If vertex is also in underlay, reduce lift (it's a boundary vertex)
+      if (vertexInUnderlay[i]) {
+        lift *= 0.2; // Boundary vertices lift less
+      }
+
+      vertices3D[i * 3 + 1] = lift;
     }
   }
 
-  // Build face indices
+  // Build face indices and face types
   const faceIndices = new Uint32Array(numFaces * 3);
+  const faceTypes = new Uint8Array(numFaces);
+
   for (let f = 0; f < numFaces; f++) {
     const face = faces[f];
     faceIndices[f * 3] = face.vertices[0];
     faceIndices[f * 3 + 1] = face.vertices[1];
     faceIndices[f * 3 + 2] = face.vertices[2];
+    faceTypes[f] = face.type === 'pleat' ? FACE_TYPE_PLEAT : FACE_TYPE_UNDERLAY;
   }
 
   // Compute normals
@@ -92,6 +149,7 @@ export function generate3DPreview(
     vertices: vertices3D,
     faces: faceIndices,
     normals,
+    faceTypes,
   };
 }
 
