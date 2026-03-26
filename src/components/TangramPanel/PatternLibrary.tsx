@@ -6,13 +6,12 @@ import { Tooltip } from '../ui';
 // Simple icons representing each pattern type
 const PATTERN_ICONS: Record<PatternPreset, string> = {
   Arrow: '↗',
-  WaterBomb: '◈',
-  Resch4: '▦',
-  Braid: '⫲',
   Leaf: '❧',
+  Braid: '⫲',
   Box: '▣',
   Brick: '⬗',
-  Diamond: '◇',
+  TwistedSquare: '⟳',
+  Heart: '♡',
 };
 
 export function PatternLibrary() {

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import * as d3 from 'd3';
 import { useAppStore } from '../../store/useAppStore';
-import { normalizePattern } from '../../engine/tangram';
+import { normalizePattern, computeTangramForGary } from '../../engine/tangram';
 
 // Colors from design system
 const COLORS = {
@@ -20,7 +20,7 @@ interface TangramSVGProps {
 
 export function TangramSVG({ mode }: TangramSVGProps) {
   const svgRef = useRef<SVGSVGElement>(null);
-  const { tiledPattern, tangramState, eta } = useAppStore();
+  const { tiledPattern, tangramState, gary } = useAppStore();
 
   useEffect(() => {
     if (!svgRef.current || !tiledPattern || !tangramState) return;
@@ -36,21 +36,26 @@ export function TangramSVG({ mode }: TangramSVGProps) {
     svg.selectAll('*').remove();
 
     // Determine which vertex positions to use
-    let vertices: [number, number][];
+    let vertices2D: Float64Array;
     if (mode === 'open') {
-      vertices = tangramState.openVertices;
+      // Gary = 1 (fully open)
+      const openState = computeTangramForGary(tiledPattern, 1.0);
+      vertices2D = openState.vertices2D;
     } else if (mode === 'closed') {
-      vertices = tangramState.closedVertices;
+      // Gary = 0 (fully closed)
+      const closedState = computeTangramForGary(tiledPattern, 0.0);
+      vertices2D = closedState.vertices2D;
     } else {
-      vertices = tangramState.vertices2D;
+      // Current state
+      vertices2D = tangramState.vertices2D;
     }
 
     // Calculate scale and offset
     const { scale, offsetX, offsetY } = normalizePattern(tiledPattern, width, height, 30);
 
     // Transform function
-    const tx = (idx: number) => vertices[idx][0] * scale + offsetX;
-    const ty = (idx: number) => vertices[idx][1] * scale + offsetY;
+    const tx = (idx: number) => vertices2D[idx * 2] * scale + offsetX;
+    const ty = (idx: number) => vertices2D[idx * 2 + 1] * scale + offsetY;
 
     // Create main group
     const g = svg.append('g');
@@ -64,7 +69,7 @@ export function TangramSVG({ mode }: TangramSVGProps) {
         .join(' ');
 
       const fillColor = face.type === 'underlay' ? COLORS.underlay : COLORS.pleat;
-      const opacity = face.type === 'pleat' ? 0.3 * (1 - eta) : 0.25;
+      const opacity = face.type === 'pleat' ? 0.3 * (1 - gary) + 0.1 : 0.25;
 
       faceGroup
         .append('polygon')
@@ -177,7 +182,7 @@ export function TangramSVG({ mode }: TangramSVGProps) {
       }
     }
 
-  }, [tiledPattern, tangramState, mode, eta]);
+  }, [tiledPattern, tangramState, mode, gary]);
 
   return (
     <svg

@@ -1,6 +1,18 @@
 import { useState } from 'react';
 import { useAppStore } from '../../store/useAppStore';
 import { Button } from '../ui';
+import type { PatternPreset } from '../../types';
+
+// Icons for patterns
+const PATTERN_ICONS: Record<PatternPreset, string> = {
+  Arrow: '↗',
+  Leaf: '❧',
+  Braid: '⫲',
+  Box: '▣',
+  Brick: '⬗',
+  TwistedSquare: '⟳',
+  Heart: '♡',
+};
 
 export function CompareTab() {
   const { savedDesigns, saveDesign, removeDesign, optimizationResult } = useAppStore();
@@ -70,10 +82,7 @@ export function CompareTab() {
                 {/* Thumbnail placeholder */}
                 <div className="h-20 bg-[var(--bg-panel)] rounded mb-2 flex items-center justify-center">
                   <div className="text-3xl text-[var(--text-muted)]">
-                    {design.pattern === 'Arrow' ? '↗' :
-                     design.pattern === 'WaterBomb' ? '◈' :
-                     design.pattern === 'Resch4' ? '▦' :
-                     design.pattern === 'Box' ? '▣' : '◇'}
+                    {PATTERN_ICONS[design.pattern] || '◇'}
                   </div>
                 </div>
 

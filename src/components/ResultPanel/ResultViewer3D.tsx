@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { useThreeScene } from '../../hooks/useThreeScene';
 import { useAppStore } from '../../store/useAppStore';
-import { generateSmockedPreview } from '../../engine/arap';
+import { generate3DPreview } from '../../engine/arap';
 import type { Mesh3D } from '../../types';
 
 export function ResultViewer3D() {
@@ -15,12 +15,12 @@ export function ResultViewer3D() {
     tiledPattern,
     resultDisplayMode,
     showFront,
-    eta,
+    gary,
   } = useAppStore();
 
   // Update preview mesh when inputs change
   useEffect(() => {
-    if (!scene.current || !targetMesh) return;
+    if (!scene.current || !tiledPattern || !tangramState) return;
 
     // Remove old mesh
     if (meshRef.current) {
@@ -34,18 +34,18 @@ export function ResultViewer3D() {
       meshRef.current = null;
     }
 
-    // Generate preview mesh
+    // Generate preview mesh from tangram
     let previewMesh: Mesh3D;
 
-    if (tangramState && tiledPattern) {
-      previewMesh = generateSmockedPreview(
-        targetMesh,
-        tangramState,
-        tiledPattern,
-        0.05 * (1 - eta)
-      );
-    } else {
-      previewMesh = targetMesh;
+    try {
+      previewMesh = generate3DPreview(tiledPattern, tangramState);
+    } catch (e) {
+      console.error('Failed to generate 3D preview:', e);
+      if (targetMesh) {
+        previewMesh = targetMesh;
+      } else {
+        return;
+      }
     }
 
     // Create geometry
@@ -57,6 +57,22 @@ export function ResultViewer3D() {
       geometry.setAttribute('normal', new THREE.BufferAttribute(previewMesh.normals, 3));
     } else {
       geometry.computeVertexNormals();
+    }
+
+    // Center the geometry
+    geometry.computeBoundingBox();
+    const center = new THREE.Vector3();
+    geometry.boundingBox!.getCenter(center);
+    geometry.translate(-center.x, -center.y, -center.z);
+
+    // Scale to fit
+    const box = geometry.boundingBox!;
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z);
+    if (maxDim > 0) {
+      const scale = 2 / maxDim;
+      geometry.scale(scale, scale, scale);
     }
 
     // Create material based on display mode
@@ -72,13 +88,23 @@ export function ResultViewer3D() {
         });
         break;
 
-      case 'Heatmap':
-        // Color vertices based on displacement
+      case 'Heatmap': {
+        // Color vertices based on height (pleat folding)
         const numVerts = previewMesh.vertices.length / 3;
         const colors = new Float32Array(numVerts * 3);
+
+        // Find height range
+        let minY = Infinity, maxY = -Infinity;
         for (let i = 0; i < numVerts; i++) {
           const y = previewMesh.vertices[i * 3 + 1];
-          const t = Math.max(0, Math.min(1, (y + 1) / 2));
+          minY = Math.min(minY, y);
+          maxY = Math.max(maxY, y);
+        }
+        const range = maxY - minY || 1;
+
+        for (let i = 0; i < numVerts; i++) {
+          const y = previewMesh.vertices[i * 3 + 1];
+          const t = (y - minY) / range;
           // Blue to red gradient
           colors[i * 3] = t;
           colors[i * 3 + 1] = 0.2;
@@ -90,6 +116,7 @@ export function ResultViewer3D() {
           side: showFront ? THREE.FrontSide : THREE.BackSide,
         });
         break;
+      }
 
       case 'PleatQuality':
         material = new THREE.MeshStandardMaterial({
@@ -134,7 +161,7 @@ export function ResultViewer3D() {
     scene.current.add(mesh);
     meshRef.current = mesh;
 
-  }, [targetMesh, tangramState, tiledPattern, resultDisplayMode, showFront, eta, scene]);
+  }, [targetMesh, tangramState, tiledPattern, resultDisplayMode, showFront, gary, scene]);
 
   return (
     <div ref={containerRef} className="w-full h-full" />
