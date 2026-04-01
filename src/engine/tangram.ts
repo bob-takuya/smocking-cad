@@ -391,6 +391,37 @@ function classifyFaces(
 }
 
 /**
+ * Find all face-connected neighbors of a vertex (underlay and pleat)
+ */
+function findAllFaceNeighbors(
+  vertIdx: number,
+  faces: Uint32Array,
+  vertices: Float64Array
+): number[] {
+  const numFaces = faces.length / 3;
+  const neighborSet = new Set<number>();
+
+  for (let f = 0; f < numFaces; f++) {
+    const v0 = faces[f * 3], v1 = faces[f * 3 + 1], v2 = faces[f * 3 + 2];
+    if (v0 === vertIdx || v1 === vertIdx || v2 === vertIdx) {
+      for (const v of [v0, v1, v2]) {
+        if (v !== vertIdx) neighborSet.add(v);
+      }
+    }
+  }
+
+  const neighbors = Array.from(neighborSet);
+  // Sort by angle for consistent winding
+  const px = vertices[vertIdx * 2], py = vertices[vertIdx * 2 + 1];
+  neighbors.sort((a, b) => {
+    const ax = vertices[a * 2] - px, ay = vertices[a * 2 + 1] - py;
+    const bx = vertices[b * 2] - px, by = vertices[b * 2 + 1] - py;
+    return Math.atan2(ay, ax) - Math.atan2(by, bx);
+  });
+  return neighbors;
+}
+
+/**
  * Compute Mean Value Coordinates for pleat vertices
  */
 function computePleatMVC(
@@ -407,12 +438,23 @@ function computePleatMVC(
   for (const pleatIdx of pleatList) {
     // Find the underlay polygon surrounding this pleat vertex
     // This is the set of underlay vertices that form a boundary around the pleat vertex
-    const neighbors = findUnderlayNeighbors(pleatIdx, vertices, faces, underlaySet, nx);
+    let neighbors = findUnderlayNeighbors(pleatIdx, vertices, faces, underlaySet, nx);
 
     if (neighbors.length < 3) {
-      // Fallback: uniform weights
-      const weights = neighbors.map(idx => ({ index: idx, weight: 1 / neighbors.length }));
-      mvcList.push({ pleatIndex: pleatIdx, neighbors: weights });
+      // Fallback: use ALL face-connected neighbors (including other pleat vertices)
+      // This handles corners/boundary cells where the vertex has no underlay neighbors
+      const allNeighbors = findAllFaceNeighbors(pleatIdx, faces, vertices);
+      if (allNeighbors.length > 0) {
+        // Uniform weights for all neighbors
+        const w = 1 / allNeighbors.length;
+        mvcList.push({
+          pleatIndex: pleatIdx,
+          neighbors: allNeighbors.map(idx => ({ index: idx, weight: w })),
+        });
+        continue;
+      }
+      // Truly isolated (no face neighbors at all) – keep at original position
+      mvcList.push({ pleatIndex: pleatIdx, neighbors: [] });
       continue;
     }
 
@@ -728,20 +770,30 @@ function computeGradient(
 }
 
 /**
- * Place pleat vertices using Mean Value Coordinates
+ * Place pleat vertices using Mean Value Coordinates (multi-pass for isolated vertices).
+ *
+ * Vertices that have no underlay neighbors (e.g. corners of the grid where
+ * the whole surrounding cell is pleat-only) fall back to averaging their
+ * face-connected neighbors.  Because those neighbors may themselves be pleat
+ * vertices, we run several passes so the displacement propagates outward from
+ * the underlay vertices.
  */
 function placePleatVertices(positions: Float64Array, pleatMVC: PleatMVC[]): void {
-  for (const mvc of pleatMVC) {
-    let x = 0;
-    let y = 0;
+  // 4 passes: guarantees propagation even if pleat vertices are 3+ hops from
+  // the nearest underlay vertex.
+  for (let pass = 0; pass < 4; pass++) {
+    for (const mvc of pleatMVC) {
+      if (mvc.neighbors.length === 0) continue;
 
-    for (const neighbor of mvc.neighbors) {
-      x += neighbor.weight * positions[neighbor.index * 2];
-      y += neighbor.weight * positions[neighbor.index * 2 + 1];
+      let x = 0, y = 0;
+      for (const neighbor of mvc.neighbors) {
+        x += neighbor.weight * positions[neighbor.index * 2];
+        y += neighbor.weight * positions[neighbor.index * 2 + 1];
+      }
+
+      positions[mvc.pleatIndex * 2] = x;
+      positions[mvc.pleatIndex * 2 + 1] = y;
     }
-
-    positions[mvc.pleatIndex * 2] = x;
-    positions[mvc.pleatIndex * 2 + 1] = y;
   }
 }
 
