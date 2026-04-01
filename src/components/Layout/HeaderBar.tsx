@@ -94,14 +94,16 @@ export function HeaderBar() {
           <span className="text-sm font-semibold text-[var(--text-primary)]">SmockingCAD</span>
         </div>
 
-        <div className="flex items-center ml-4">
+        {/* Desktop menus */}
+        <div className="hidden md:flex items-center ml-4">
           <Menu label="File" items={fileMenuItems} />
           <Menu label="Edit" items={editMenuItems} />
           <Menu label="View" items={viewMenuItems} />
         </div>
       </div>
 
-      <div className="flex items-center gap-1">
+      {/* Desktop layout mode buttons */}
+      <div className="hidden md:flex items-center gap-1">
         {LAYOUT_MODES.map(({ value, label }) => (
           <button
             key={value}
@@ -117,6 +119,7 @@ export function HeaderBar() {
         ))}
       </div>
 
+      {/* Export button */}
       <div className="flex items-center gap-2">
         <button
           onClick={() => setExportModalOpen(true)}

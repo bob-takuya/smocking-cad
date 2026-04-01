@@ -58,8 +58,17 @@ export function TangramSVG({ mode }: TangramSVGProps) {
     const tx = (idx: number) => vertices2D[idx * 2] * scale + offsetX;
     const ty = (idx: number) => vertices2D[idx * 2 + 1] * scale + offsetY;
 
-    // Create main group
+    // Create main group with zoom behavior
     const g = svg.append('g');
+
+    // Add zoom and pan behavior with touch support
+    const zoom = d3.zoom<SVGSVGElement, unknown>()
+      .scaleExtent([0.5, 8])
+      .on('zoom', (event) => {
+        g.attr('transform', event.transform.toString());
+      });
+
+    svg.call(zoom);
 
     // Draw faces
     const faceGroup = g.append('g').attr('class', 'faces');

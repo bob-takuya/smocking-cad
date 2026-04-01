@@ -180,6 +180,7 @@ export interface Singularity {
 export type LayoutMode = 'Explore' | 'ShapeFocus' | 'PatternFocus' | 'ResultFocus';
 export type InspectorTab = 'Optimization' | 'Singularities' | 'Analysis' | 'Compare';
 export type ResultDisplayMode = 'Smocked' | 'Heatmap' | 'PleatQuality' | 'TangramOverlay' | 'Transparent';
+export type ActiveTab = 'Shape' | 'Pattern' | 'Result' | 'Inspector';
 
 // ============================================================
 // Export Types
@@ -250,6 +251,7 @@ export interface AppState {
 
   // Layout
   layoutMode: LayoutMode;
+  activeTab: ActiveTab;
   inspectorOpen: boolean;
   inspectorTab: InspectorTab;
   exportModalOpen: boolean;
@@ -277,6 +279,7 @@ export interface AppState {
   setSingularityMode: (mode: SingularityMode) => void;
   setSingularities: (s: Singularity[]) => void;
   setLayoutMode: (mode: LayoutMode) => void;
+  setActiveTab: (tab: ActiveTab) => void;
   setInspectorOpen: (open: boolean) => void;
   setInspectorTab: (tab: InspectorTab) => void;
   setExportModalOpen: (open: boolean) => void;
