@@ -17,7 +17,7 @@ export function ResultPanel() {
         </Button>
       }
     >
-      <div className="flex flex-col h-full">
+      <div className="flex flex-col h-full min-h-0">
         {/* 3D Viewer */}
         <div className="flex-1 relative">
           <ResultViewer3D />

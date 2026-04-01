@@ -53,7 +53,7 @@ export function ShapePanel() {
 
   return (
     <Panel title="Target Shape" noPadding className="h-full">
-      <div className="flex h-full">
+      <div className="flex h-full min-h-0">
         {/* 3D Viewer */}
         <div
           className="flex-1 relative"

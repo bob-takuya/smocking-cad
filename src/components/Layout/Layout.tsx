@@ -79,10 +79,10 @@ export function Layout({ shapePanel, tangramPanel, resultPanel, inspectorPanel }
 
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Desktop: 3-column layout */}
-        <div className="hidden md:flex flex-1 overflow-hidden">
+        <div className="hidden md:flex flex-1 overflow-hidden min-h-0">
           {/* Shape Panel */}
           <div
-            className="overflow-hidden flex flex-col"
+            className="overflow-hidden flex flex-col min-h-0"
             style={{ width: `${effectiveWidths.shape}%` }}
           >
             {shapePanel}
@@ -92,7 +92,7 @@ export function Layout({ shapePanel, tangramPanel, resultPanel, inspectorPanel }
 
           {/* Tangram Panel */}
           <div
-            className="overflow-hidden flex flex-col"
+            className="overflow-hidden flex flex-col min-h-0"
             style={{ width: `${effectiveWidths.tangram}%` }}
           >
             {tangramPanel}
@@ -102,7 +102,7 @@ export function Layout({ shapePanel, tangramPanel, resultPanel, inspectorPanel }
 
           {/* Result Panel */}
           <div
-            className="overflow-hidden flex flex-col"
+            className="overflow-hidden flex flex-col min-h-0"
             style={{ width: `${effectiveWidths.result}%` }}
           >
             {resultPanel}

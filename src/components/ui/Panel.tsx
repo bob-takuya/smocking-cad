@@ -17,7 +17,7 @@ export function Panel({ title, children, className = '', headerActions, noPaddin
           {headerActions && <div className="flex items-center gap-1">{headerActions}</div>}
         </div>
       )}
-      <div className={`flex-1 overflow-auto ${noPadding ? '' : 'p-3'}`}>
+      <div className={`flex-1 min-h-0 ${noPadding ? 'overflow-hidden flex flex-col' : 'overflow-auto p-3'}`}>
         {children}
       </div>
     </div>
