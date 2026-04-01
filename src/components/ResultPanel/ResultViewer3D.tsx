@@ -1,16 +1,29 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState, useMemo } from 'react';
 import * as THREE from 'three';
 import { useThreeScene } from '../../hooks/useThreeScene';
 import { useAppStore } from '../../store/useAppStore';
 import { generate3DPreview, FACE_TYPE_UNDERLAY, type ColoredMesh3D } from '../../engine/arap';
+import { runPhysicsSimulation, type SimulationResult, type PhysicsParams } from '../../engine/physics';
 
 // Colors matching the 2D tangram view
 const UNDERLAY_COLOR = 0x4a90d9;  // Blue
 const PLEAT_COLOR = 0xe8669a;     // Pink/rose
 
+// Default physics parameters
+const DEFAULT_PHYSICS_PARAMS: PhysicsParams = {
+  stretchCompliance: 1e-4,
+  bendingCompliance: 1e-3,
+  stitchStiffness: 1.0,
+  gravity: 9.8,
+  substeps: 8,
+  damping: 0.01,
+};
+
 export function ResultViewer3D() {
   const { containerRef, scene } = useThreeScene();
   const meshGroupRef = useRef<THREE.Group | null>(null);
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [simulationResult, setSimulationResult] = useState<SimulationResult | null>(null);
 
   const {
     targetMesh,
@@ -21,7 +34,41 @@ export function ResultViewer3D() {
     gary,
   } = useAppStore();
 
-  // Update preview mesh when inputs change
+  // Convert gary to stitchStiffness: gary=0 → stiffness=1.0, gary=1 → stiffness=0.0
+  const stitchStiffness = 1.0 - gary;
+
+  // Memoize physics params to avoid re-simulation on every render
+  const physicsParams = useMemo<PhysicsParams>(() => ({
+    ...DEFAULT_PHYSICS_PARAMS,
+    stitchStiffness,
+  }), [stitchStiffness]);
+
+  // Run physics simulation when parameters change (debounced)
+  useEffect(() => {
+    if (!tiledPattern) return;
+
+    setIsSimulating(true);
+
+    const timeoutId = setTimeout(() => {
+      try {
+        const result = runPhysicsSimulation(
+          tiledPattern,
+          tiledPattern.tangram,
+          physicsParams,
+          300
+        );
+        setSimulationResult(result);
+      } catch (e) {
+        console.error('Physics simulation failed:', e);
+      } finally {
+        setIsSimulating(false);
+      }
+    }, 500); // 500ms debounce
+
+    return () => clearTimeout(timeoutId);
+  }, [tiledPattern, physicsParams]);
+
+  // Update preview mesh when simulation completes
   useEffect(() => {
     if (!scene.current || !tiledPattern || !tangramState) return;
 
@@ -41,11 +88,15 @@ export function ResultViewer3D() {
       meshGroupRef.current = null;
     }
 
-    // Generate preview mesh from tangram
-    let previewMesh: ColoredMesh3D;
+    // Use physics simulation if available, otherwise fall back to heuristic
+    let previewMesh: ColoredMesh3D | SimulationResult;
 
     try {
-      previewMesh = generate3DPreview(tiledPattern, tangramState);
+      if (simulationResult && !isSimulating) {
+        previewMesh = simulationResult;
+      } else {
+        previewMesh = generate3DPreview(tiledPattern, tangramState);
+      }
     } catch (e) {
       console.error('Failed to generate 3D preview:', e);
       return;
@@ -184,9 +235,32 @@ export function ResultViewer3D() {
     scene.current.add(group);
     meshGroupRef.current = group;
 
-  }, [targetMesh, tangramState, tiledPattern, resultDisplayMode, showFront, gary, scene]);
+  }, [targetMesh, tangramState, tiledPattern, resultDisplayMode, showFront, gary, scene, simulationResult, isSimulating]);
 
   return (
-    <div ref={containerRef} className="w-full h-full" />
+    <div className="relative w-full h-full">
+      <div ref={containerRef} className="w-full h-full" />
+      {isSimulating && (
+        <div className="absolute top-4 right-4 bg-black/50 text-white px-3 py-2 rounded-md flex items-center gap-2">
+          <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+            <circle
+              className="opacity-25"
+              cx="12"
+              cy="12"
+              r="10"
+              stroke="currentColor"
+              strokeWidth="4"
+              fill="none"
+            />
+            <path
+              className="opacity-75"
+              fill="currentColor"
+              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+            />
+          </svg>
+          <span className="text-sm">Simulating physics...</span>
+        </div>
+      )}
+    </div>
   );
 }
