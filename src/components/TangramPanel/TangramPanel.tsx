@@ -13,7 +13,7 @@ export function TangramPanel() {
       noPadding
       className="h-full"
     >
-      <div className="flex flex-col h-full">
+      <div className="flex flex-col h-full min-h-0">
         {/* Pattern Library (collapsible) */}
         <div className="border-b border-[var(--border)]">
           <PatternLibrary />
