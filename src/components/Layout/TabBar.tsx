@@ -45,7 +45,7 @@ export function DesktopTabBar() {
   const { activeTab, setActiveTab } = useAppStore();
 
   return (
-    <div className="hidden md:flex h-10 bg-[var(--bg-darkest)] border-b border-[var(--border)] px-2 items-center gap-1">
+    <div className="hidden md:flex h-8 bg-[var(--bg-darkest)] border-b border-[var(--border)] px-2 items-center gap-1">
       {TABS.slice(0, 3).map((tab) => (
         <button
           key={tab.id}

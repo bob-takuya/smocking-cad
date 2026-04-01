@@ -32,6 +32,7 @@ export function ResultViewer3D() {
     resultDisplayMode,
     showFront,
     gary,
+    optimizationStatus,
   } = useAppStore();
 
   // Convert gary to stitchStiffness: gary=0 → stiffness=1.0, gary=1 → stiffness=0.0
@@ -46,6 +47,9 @@ export function ResultViewer3D() {
   // Run physics simulation when parameters change (debounced)
   useEffect(() => {
     if (!tiledPattern) return;
+
+    // Skip physics simulation during optimization
+    if (optimizationStatus === 'running') return;
 
     setIsSimulating(true);
 
@@ -66,11 +70,14 @@ export function ResultViewer3D() {
     }, 500); // 500ms debounce
 
     return () => clearTimeout(timeoutId);
-  }, [tiledPattern, physicsParams]);
+  }, [tiledPattern, physicsParams, optimizationStatus]);
 
   // Update preview mesh when simulation completes
   useEffect(() => {
     if (!scene.current || !tiledPattern || !tangramState) return;
+
+    // Don't update mesh during simulation - keep old mesh visible
+    if (isSimulating) return;
 
     // Remove old mesh group
     if (meshGroupRef.current) {

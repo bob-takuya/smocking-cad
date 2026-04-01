@@ -42,7 +42,7 @@ export function TangramPanel() {
         </div>
 
         {/* Single SVG Viewer with live η animation */}
-        <div className="flex-1 relative overflow-hidden">
+        <div className="flex-1 relative overflow-hidden min-h-0" style={{ minHeight: '120px' }}>
           {/* Main live view driven by slider */}
           <TangramSVG mode="current" />
 

@@ -1,10 +1,11 @@
 /**
- * XPBD Physics Simulation for Smocking
+ * Kangaroo-style Goal-based Physics Simulation for Smocking
  *
- * Implements Extended Position Based Dynamics (XPBD) for realistic cloth simulation
- * with smocking-specific stitch constraints.
+ * Implements a goal-driven Position Based Dynamics approach inspired by Kangaroo2.
+ * Each constraint is a "goal" that computes target positions for vertices,
+ * and all goals are solved iteratively via weighted averaging.
  *
- * Reference: Macklin et al. 2016 "XPBD: Position-Based Simulation of Compliant Constrained Dynamics"
+ * Reference: Daniel Piker's Kangaroo2 (Grasshopper)
  */
 
 import type { TiledPattern, TangramData } from '../types';
@@ -25,30 +26,18 @@ export interface SimulationResult {
   faceTypes: Uint8Array;        // 0=pleat, 1=underlay
 }
 
-interface Edge {
-  a: number;
-  b: number;
-  restLength: number;
-}
-
-interface BendingConstraint {
-  v0: number;  // shared edge vertices
-  v1: number;
-  v2: number;  // vertices opposite to edge
-  v3: number;
-  restAngle: number;
-}
-
-interface StitchConstraint {
-  vertices: number[];  // all vertices in a stitch line
-  targetCenter: Float32Array;  // target center point [x,y,z]
-}
+// Goal types
+type Goal =
+  | { type: 'spring'; a: number; b: number; restLen: number; stiffness: number }
+  | { type: 'bend'; v0: number; v1: number; v2: number; v3: number; restAngle: number; stiffness: number }
+  | { type: 'stitch'; vertices: number[]; stiffness: number }
+  | { type: 'anchor'; vertex: number; position: [number, number, number] };
 
 const FACE_TYPE_UNDERLAY = 1;
 const FACE_TYPE_PLEAT = 0;
 
 /**
- * Run XPBD physics simulation
+ * Run Kangaroo-style goal-based physics simulation
  */
 export function runPhysicsSimulation(
   tiledPattern: TiledPattern,
@@ -64,9 +53,18 @@ export function runPhysicsSimulation(
 
   // Initialize positions (spread flat on XZ plane, Y up)
   const positions = new Float32Array(numVerts * 3);
-  const prevPositions = new Float32Array(numVerts * 3);
   const velocities = new Float32Array(numVerts * 3);
-  const invMass = new Float32Array(numVerts);
+  const masses = new Float32Array(numVerts).fill(1.0);
+
+  // Find bounding box of 2D pattern
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  for (const v of tiledVerts) {
+    minX = Math.min(minX, v.x);
+    maxX = Math.max(maxX, v.x);
+    minY = Math.min(minY, v.y);
+    maxY = Math.max(maxY, v.y);
+  }
 
   // Initialize from 2D tangram positions
   for (let i = 0; i < numVerts; i++) {
@@ -74,32 +72,25 @@ export function runPhysicsSimulation(
     positions[i * 3] = v.x;
     positions[i * 3 + 1] = 0;  // start flat
     positions[i * 3 + 2] = v.y;
-
-    prevPositions[i * 3] = v.x;
-    prevPositions[i * 3 + 1] = 0;
-    prevPositions[i * 3 + 2] = v.y;
-
-    invMass[i] = 1.0;  // uniform mass
   }
 
-  // Build edges from triangulation
-  const edgeMap = new Map<string, Edge>();
-  const edgeList: Edge[] = [];
+  // Build goals
+  const goals: Goal[] = [];
 
+  // 1. Spring goals (edge length preservation)
+  const edgeMap = new Map<string, boolean>();
   for (let f = 0; f < numFaces; f++) {
     const v0 = tangFaces[f * 3];
     const v1 = tangFaces[f * 3 + 1];
     const v2 = tangFaces[f * 3 + 2];
 
-    addEdge(edgeMap, edgeList, v0, v1, positions);
-    addEdge(edgeMap, edgeList, v1, v2, positions);
-    addEdge(edgeMap, edgeList, v2, v0, positions);
+    addSpringGoal(goals, edgeMap, v0, v1, positions, params.stretchCompliance);
+    addSpringGoal(goals, edgeMap, v1, v2, positions, params.stretchCompliance);
+    addSpringGoal(goals, edgeMap, v2, v0, positions, params.stretchCompliance);
   }
 
-  // Build bending constraints (pairs of adjacent triangles)
-  const bendingConstraints: BendingConstraint[] = [];
+  // 2. Bending goals (dihedral angle between adjacent faces)
   const faceEdges = new Map<string, number[]>();
-
   for (let f = 0; f < numFaces; f++) {
     const v0 = tangFaces[f * 3];
     const v1 = tangFaces[f * 3 + 1];
@@ -110,7 +101,6 @@ export function runPhysicsSimulation(
     addFaceEdge(faceEdges, v2, v0, f);
   }
 
-  // For each edge shared by two faces, create a bending constraint
   for (const [_edgeKey, faceIds] of faceEdges) {
     if (faceIds.length === 2) {
       const f0 = faceIds[0];
@@ -139,38 +129,44 @@ export function runPhysicsSimulation(
       }
 
       if (shared.length === 2 && opposite0.length === 1 && opposite1.length === 1) {
-        bendingConstraints.push({
+        goals.push({
+          type: 'bend',
           v0: shared[0],
           v1: shared[1],
           v2: opposite0[0],
           v3: opposite1[0],
           restAngle: 0,  // flat initial state
+          stiffness: 1.0 / (params.bendingCompliance + 1e-6),
         });
       }
     }
   }
 
-  // Build stitch constraints
-  const stitchConstraints: StitchConstraint[] = [];
-
+  // 3. Stitch goals (pull vertices together)
   for (const stitchLine of stitchingLines) {
     if (stitchLine.length < 2) continue;
 
-    // Compute target center (average of initial positions)
-    let cx = 0, cy = 0, cz = 0;
-    for (const vIdx of stitchLine) {
-      cx += positions[vIdx * 3];
-      cy += positions[vIdx * 3 + 1];
-      cz += positions[vIdx * 3 + 2];
-    }
-    cx /= stitchLine.length;
-    cy /= stitchLine.length;
-    cz /= stitchLine.length;
-
-    stitchConstraints.push({
+    goals.push({
+      type: 'stitch',
       vertices: stitchLine,
-      targetCenter: new Float32Array([cx, cy, cz]),
+      stiffness: params.stitchStiffness,
     });
+  }
+
+  // 4. Anchor goals (fix top edge perimeter vertices)
+  // Fix vertices along the top edge (maxY boundary) to hang the cloth
+  const anchorThreshold = 0.01;
+  for (let i = 0; i < numVerts; i++) {
+    const v = tiledVerts[i];
+    // Anchor vertices on the top edge
+    if (Math.abs(v.y - maxY) < anchorThreshold) {
+      goals.push({
+        type: 'anchor',
+        vertex: i,
+        position: [v.x, 0, v.y],
+      });
+      masses[i] = 0;  // infinite mass (fixed)
+    }
   }
 
   // Simulation parameters
@@ -178,24 +174,16 @@ export function runPhysicsSimulation(
   const subDt = dt / params.substeps;
   const gravity = new Float32Array([0, -params.gravity, 0]);
 
-  // XPBD lambda storage
-  const edgeLambdas = new Float32Array(edgeList.length);
-  const bendingLambdas = new Float32Array(bendingConstraints.length);
-
   // Main simulation loop
   for (let step = 0; step < steps; step++) {
-    // Store previous positions
-    for (let i = 0; i < numVerts * 3; i++) {
-      prevPositions[i] = positions[i];
-    }
-
-    // Substep loop
     for (let sub = 0; sub < params.substeps; sub++) {
       // Apply gravity
       for (let i = 0; i < numVerts; i++) {
-        velocities[i * 3] += gravity[0] * subDt;
-        velocities[i * 3 + 1] += gravity[1] * subDt;
-        velocities[i * 3 + 2] += gravity[2] * subDt;
+        if (masses[i] > 0) {  // skip anchored vertices
+          velocities[i * 3] += gravity[0] * subDt;
+          velocities[i * 3 + 1] += gravity[1] * subDt;
+          velocities[i * 3 + 2] += gravity[2] * subDt;
+        }
       }
 
       // Apply damping
@@ -212,59 +200,8 @@ export function runPhysicsSimulation(
         positions[i * 3 + 2] += velocities[i * 3 + 2] * subDt;
       }
 
-      // Solve constraints
-
-      // 1. Stretch constraints (edge length preservation)
-      for (let e = 0; e < edgeList.length; e++) {
-        const edge = edgeList[e];
-        solveStretchConstraint(
-          positions,
-          invMass,
-          edge.a,
-          edge.b,
-          edge.restLength,
-          params.stretchCompliance,
-          subDt,
-          edgeLambdas,
-          e
-        );
-      }
-
-      // 2. Bending constraints
-      for (let b = 0; b < bendingConstraints.length; b++) {
-        const bc = bendingConstraints[b];
-        solveBendingConstraint(
-          positions,
-          invMass,
-          bc.v0,
-          bc.v1,
-          bc.v2,
-          bc.v3,
-          bc.restAngle,
-          params.bendingCompliance,
-          subDt,
-          bendingLambdas,
-          b
-        );
-      }
-
-      // 3. Stitch constraints (pull vertices together)
-      for (const sc of stitchConstraints) {
-        solveStitchConstraint(
-          positions,
-          invMass,
-          sc.vertices,
-          sc.targetCenter,
-          params.stitchStiffness
-        );
-      }
-
-      // Update velocities
-      for (let i = 0; i < numVerts; i++) {
-        velocities[i * 3] = (positions[i * 3] - prevPositions[i * 3]) / subDt;
-        velocities[i * 3 + 1] = (positions[i * 3 + 1] - prevPositions[i * 3 + 1]) / subDt;
-        velocities[i * 3 + 2] = (positions[i * 3 + 2] - prevPositions[i * 3 + 2]) / subDt;
-      }
+      // Solve all goals
+      solveGoals(positions, masses, goals);
     }
   }
 
@@ -286,14 +223,15 @@ export function runPhysicsSimulation(
 }
 
 /**
- * Add edge to edge list (avoid duplicates)
+ * Add spring goal to goal list (avoid duplicates)
  */
-function addEdge(
-  edgeMap: Map<string, Edge>,
-  edgeList: Edge[],
+function addSpringGoal(
+  goals: Goal[],
+  edgeMap: Map<string, boolean>,
   a: number,
   b: number,
-  positions: Float32Array
+  positions: Float32Array,
+  compliance: number
 ): void {
   const key = a < b ? `${a},${b}` : `${b},${a}`;
   if (edgeMap.has(key)) return;
@@ -301,15 +239,21 @@ function addEdge(
   const dx = positions[b * 3] - positions[a * 3];
   const dy = positions[b * 3 + 1] - positions[a * 3 + 1];
   const dz = positions[b * 3 + 2] - positions[a * 3 + 2];
-  const restLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  const restLen = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-  const edge = { a, b, restLength };
-  edgeMap.set(key, edge);
-  edgeList.push(edge);
+  goals.push({
+    type: 'spring',
+    a,
+    b,
+    restLen,
+    stiffness: 1.0 / (compliance + 1e-6),
+  });
+
+  edgeMap.set(key, true);
 }
 
 /**
- * Add face edge mapping for bending constraint detection
+ * Add face edge mapping for bending goal detection
  */
 function addFaceEdge(faceEdges: Map<string, number[]>, a: number, b: number, faceId: number): void {
   const key = a < b ? `${a},${b}` : `${b},${a}`;
@@ -320,151 +264,118 @@ function addFaceEdge(faceEdges: Map<string, number[]>, a: number, b: number, fac
 }
 
 /**
- * Solve stretch constraint (XPBD)
+ * Solve all goals using Gauss-Seidel iteration
  */
-function solveStretchConstraint(
-  positions: Float32Array,
-  invMass: Float32Array,
-  a: number,
-  b: number,
-  restLength: number,
-  compliance: number,
-  dt: number,
-  lambdas: Float32Array,
-  constraintIdx: number
-): void {
-  const dx = positions[b * 3] - positions[a * 3];
-  const dy = positions[b * 3 + 1] - positions[a * 3 + 1];
-  const dz = positions[b * 3 + 2] - positions[a * 3 + 2];
+function solveGoals(positions: Float32Array, masses: Float32Array, goals: Goal[]): void {
+  const numVerts = positions.length / 3;
+  const targetPositions = new Float32Array(numVerts * 3);
+  const weightSums = new Float32Array(numVerts);
 
-  const currentLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
-  if (currentLength < 1e-6) return;
+  // For each goal, compute target positions and accumulate
+  for (const goal of goals) {
+    switch (goal.type) {
+      case 'spring': {
+        const dx = positions[goal.b * 3] - positions[goal.a * 3];
+        const dy = positions[goal.b * 3 + 1] - positions[goal.a * 3 + 1];
+        const dz = positions[goal.b * 3 + 2] - positions[goal.a * 3 + 2];
+        const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-  const C = currentLength - restLength;
+        if (len > 1e-6) {
+          const factor = goal.restLen / len;
+          const midX = (positions[goal.a * 3] + positions[goal.b * 3]) * 0.5;
+          const midY = (positions[goal.a * 3 + 1] + positions[goal.b * 3 + 1]) * 0.5;
+          const midZ = (positions[goal.a * 3 + 2] + positions[goal.b * 3 + 2]) * 0.5;
 
-  const gradA = [-dx / currentLength, -dy / currentLength, -dz / currentLength];
-  const gradB = [dx / currentLength, dy / currentLength, dz / currentLength];
+          // Target for vertex a
+          targetPositions[goal.a * 3] += (midX - dx * factor * 0.5) * goal.stiffness;
+          targetPositions[goal.a * 3 + 1] += (midY - dy * factor * 0.5) * goal.stiffness;
+          targetPositions[goal.a * 3 + 2] += (midZ - dz * factor * 0.5) * goal.stiffness;
+          weightSums[goal.a] += goal.stiffness;
 
-  const w = invMass[a] + invMass[b];
-  if (w < 1e-6) return;
+          // Target for vertex b
+          targetPositions[goal.b * 3] += (midX + dx * factor * 0.5) * goal.stiffness;
+          targetPositions[goal.b * 3 + 1] += (midY + dy * factor * 0.5) * goal.stiffness;
+          targetPositions[goal.b * 3 + 2] += (midZ + dz * factor * 0.5) * goal.stiffness;
+          weightSums[goal.b] += goal.stiffness;
+        }
+        break;
+      }
 
-  const alpha = compliance / (dt * dt);
-  const deltaLambda = (-C - alpha * lambdas[constraintIdx]) / (w + alpha);
+      case 'bend': {
+        // Simplified bending: keep adjacent faces close to flat
+        const p0 = [positions[goal.v0 * 3], positions[goal.v0 * 3 + 1], positions[goal.v0 * 3 + 2]];
+        const p1 = [positions[goal.v1 * 3], positions[goal.v1 * 3 + 1], positions[goal.v1 * 3 + 2]];
+        const p2 = [positions[goal.v2 * 3], positions[goal.v2 * 3 + 1], positions[goal.v2 * 3 + 2]];
+        const p3 = [positions[goal.v3 * 3], positions[goal.v3 * 3 + 1], positions[goal.v3 * 3 + 2]];
 
-  lambdas[constraintIdx] += deltaLambda;
+        // Compute normals
+        const e = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+        const e0 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+        const e1 = [p3[0] - p0[0], p3[1] - p0[1], p3[2] - p0[2]];
 
-  positions[a * 3] += deltaLambda * invMass[a] * gradA[0];
-  positions[a * 3 + 1] += deltaLambda * invMass[a] * gradA[1];
-  positions[a * 3 + 2] += deltaLambda * invMass[a] * gradA[2];
+        const n0 = cross(e, e0);
+        const n1 = cross(e1, e);
 
-  positions[b * 3] += deltaLambda * invMass[b] * gradB[0];
-  positions[b * 3 + 1] += deltaLambda * invMass[b] * gradB[1];
-  positions[b * 3 + 2] += deltaLambda * invMass[b] * gradB[2];
-}
+        normalize(n0);
+        normalize(n1);
 
-/**
- * Solve bending constraint (dihedral angle between adjacent faces)
- */
-function solveBendingConstraint(
-  positions: Float32Array,
-  invMass: Float32Array,
-  v0: number,
-  v1: number,
-  v2: number,
-  v3: number,
-  restAngle: number,
-  compliance: number,
-  dt: number,
-  lambdas: Float32Array,
-  constraintIdx: number
-): void {
-  // Get positions
-  const p0 = [positions[v0 * 3], positions[v0 * 3 + 1], positions[v0 * 3 + 2]];
-  const p1 = [positions[v1 * 3], positions[v1 * 3 + 1], positions[v1 * 3 + 2]];
-  const p2 = [positions[v2 * 3], positions[v2 * 3 + 1], positions[v2 * 3 + 2]];
-  const p3 = [positions[v3 * 3], positions[v3 * 3 + 1], positions[v3 * 3 + 2]];
+        // Push v2 and v3 to align normals (simplified)
+        const correction = 0.01 * goal.stiffness;
+        targetPositions[goal.v2 * 3] += (p2[0] + n0[0] * correction) * goal.stiffness;
+        targetPositions[goal.v2 * 3 + 1] += (p2[1] + n0[1] * correction) * goal.stiffness;
+        targetPositions[goal.v2 * 3 + 2] += (p2[2] + n0[2] * correction) * goal.stiffness;
+        weightSums[goal.v2] += goal.stiffness;
 
-  // Compute edge vectors
-  const e = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+        targetPositions[goal.v3 * 3] += (p3[0] - n1[0] * correction) * goal.stiffness;
+        targetPositions[goal.v3 * 3 + 1] += (p3[1] - n1[1] * correction) * goal.stiffness;
+        targetPositions[goal.v3 * 3 + 2] += (p3[2] - n1[2] * correction) * goal.stiffness;
+        weightSums[goal.v3] += goal.stiffness;
+        break;
+      }
 
-  // Compute normals of both faces
-  const e0 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
-  const e1 = [p3[0] - p0[0], p3[1] - p0[1], p3[2] - p0[2]];
+      case 'stitch': {
+        if (goal.stiffness < 1e-6) break;
 
-  const n0 = cross(e, e0);
-  const n1 = cross(e1, e);
+        // Compute center of all vertices in stitch
+        let cx = 0, cy = 0, cz = 0;
+        for (const v of goal.vertices) {
+          cx += positions[v * 3];
+          cy += positions[v * 3 + 1];
+          cz += positions[v * 3 + 2];
+        }
+        cx /= goal.vertices.length;
+        cy /= goal.vertices.length;
+        cz /= goal.vertices.length;
 
-  const n0Len = length(n0);
-  const n1Len = length(n1);
+        // Pull each vertex toward center
+        for (const v of goal.vertices) {
+          targetPositions[v * 3] += cx * goal.stiffness;
+          targetPositions[v * 3 + 1] += cy * goal.stiffness;
+          targetPositions[v * 3 + 2] += cz * goal.stiffness;
+          weightSums[v] += goal.stiffness;
+        }
+        break;
+      }
 
-  if (n0Len < 1e-6 || n1Len < 1e-6) return;
-
-  normalize(n0, n0Len);
-  normalize(n1, n1Len);
-
-  // Compute dihedral angle
-  const cosAngle = Math.max(-1, Math.min(1, dot(n0, n1)));
-  const angle = Math.acos(cosAngle);
-
-  const C = angle - restAngle;
-
-  // Simplified gradient (full derivation is complex)
-  // We approximate by pushing vertices to reduce angle difference
-  const w = invMass[v0] + invMass[v1] + invMass[v2] + invMass[v3];
-  if (w < 1e-6) return;
-
-  const alpha = compliance / (dt * dt);
-  const deltaLambda = (-C - alpha * lambdas[constraintIdx]) / (w + alpha);
-
-  lambdas[constraintIdx] += deltaLambda;
-
-  // Apply correction (simplified)
-  const correction = deltaLambda * 0.1;
-
-  const dir = [n0[0] + n1[0], n0[1] + n1[1], n0[2] + n1[2]];
-  normalize(dir, length(dir));
-
-  positions[v2 * 3] += correction * invMass[v2] * dir[0];
-  positions[v2 * 3 + 1] += correction * invMass[v2] * dir[1];
-  positions[v2 * 3 + 2] += correction * invMass[v2] * dir[2];
-
-  positions[v3 * 3] -= correction * invMass[v3] * dir[0];
-  positions[v3 * 3 + 1] -= correction * invMass[v3] * dir[1];
-  positions[v3 * 3 + 2] -= correction * invMass[v3] * dir[2];
-}
-
-/**
- * Solve stitch constraint (pull vertices together)
- */
-function solveStitchConstraint(
-  positions: Float32Array,
-  invMass: Float32Array,
-  vertices: number[],
-  targetCenter: Float32Array,
-  stiffness: number
-): void {
-  if (stiffness < 1e-6) return;
-
-  // Compute current center of mass
-  let cx = 0, cy = 0, cz = 0;
-  for (const v of vertices) {
-    cx += positions[v * 3];
-    cy += positions[v * 3 + 1];
-    cz += positions[v * 3 + 2];
+      case 'anchor': {
+        // Fixed position (infinite stiffness)
+        const weight = 1e6;
+        targetPositions[goal.vertex * 3] += goal.position[0] * weight;
+        targetPositions[goal.vertex * 3 + 1] += goal.position[1] * weight;
+        targetPositions[goal.vertex * 3 + 2] += goal.position[2] * weight;
+        weightSums[goal.vertex] += weight;
+        break;
+      }
+    }
   }
-  cx /= vertices.length;
-  cy /= vertices.length;
-  cz /= vertices.length;
 
-  // Pull each vertex toward the target center
-  for (const v of vertices) {
-    const dx = targetCenter[0] - positions[v * 3];
-    const dy = targetCenter[1] - positions[v * 3 + 1];
-    const dz = targetCenter[2] - positions[v * 3 + 2];
-
-    positions[v * 3] += dx * stiffness * invMass[v] * 0.5;
-    positions[v * 3 + 1] += dy * stiffness * invMass[v] * 0.5;
-    positions[v * 3 + 2] += dz * stiffness * invMass[v] * 0.5;
+  // Update positions by weighted average
+  for (let i = 0; i < numVerts; i++) {
+    if (weightSums[i] > 1e-6 && masses[i] > 0) {
+      positions[i * 3] = targetPositions[i * 3] / weightSums[i];
+      positions[i * 3 + 1] = targetPositions[i * 3 + 1] / weightSums[i];
+      positions[i * 3 + 2] = targetPositions[i * 3 + 2] / weightSums[i];
+    }
   }
 }
 
@@ -532,15 +443,8 @@ function cross(a: number[], b: number[]): number[] {
   ];
 }
 
-function dot(a: number[], b: number[]): number {
-  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-function length(v: number[]): number {
-  return Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-}
-
-function normalize(v: number[], len: number): void {
+function normalize(v: number[]): void {
+  const len = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
   if (len > 1e-6) {
     v[0] /= len;
     v[1] /= len;
