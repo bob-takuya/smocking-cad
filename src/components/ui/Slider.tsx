@@ -47,11 +47,16 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
           max={max}
           step={step}
           onChange={(e) => onChange(parseFloat(e.target.value))}
-          className="w-full h-1 rounded-full appearance-none cursor-pointer bg-[var(--border-light)]
-                     [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3
+          className="w-full h-2 md:h-1 rounded-full appearance-none cursor-pointer bg-[var(--border-light)]
+                     [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-5 [&::-webkit-slider-thumb]:h-5
+                     md:[&::-webkit-slider-thumb]:w-3 md:[&::-webkit-slider-thumb]:h-3
                      [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[var(--accent)]
                      [&::-webkit-slider-thumb]:hover:bg-[var(--accent-hover)] [&::-webkit-slider-thumb]:cursor-pointer
-                     [&::-webkit-slider-thumb]:transition-colors"
+                     [&::-webkit-slider-thumb]:transition-colors
+                     [&::-moz-range-thumb]:w-5 [&::-moz-range-thumb]:h-5
+                     md:[&::-moz-range-thumb]:w-3 md:[&::-moz-range-thumb]:h-3
+                     [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-[var(--accent)]
+                     [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:cursor-pointer"
           {...props}
         />
       </div>

@@ -2,6 +2,7 @@ import { useCallback, useState, type ReactNode } from 'react';
 import { useAppStore } from '../../store/useAppStore';
 import { HeaderBar } from './HeaderBar';
 import { PanelResizer } from './PanelResizer';
+import { MobileTabBar, DesktopTabBar } from './TabBar';
 
 interface LayoutProps {
   shapePanel: ReactNode;
@@ -11,7 +12,7 @@ interface LayoutProps {
 }
 
 export function Layout({ shapePanel, tangramPanel, resultPanel, inspectorPanel }: LayoutProps) {
-  const { layoutMode, inspectorOpen } = useAppStore();
+  const { layoutMode, inspectorOpen, activeTab } = useAppStore();
 
   // Panel widths as percentages
   const [panelWidths, setPanelWidths] = useState({
@@ -73,8 +74,12 @@ export function Layout({ shapePanel, tangramPanel, resultPanel, inspectorPanel }
     <div className="h-screen w-screen flex flex-col bg-[var(--bg-darkest)] overflow-hidden">
       <HeaderBar />
 
+      {/* Desktop: Tab bar above panels */}
+      <DesktopTabBar />
+
       <div className="flex-1 flex flex-col overflow-hidden">
-        <div className="flex-1 flex overflow-hidden">
+        {/* Desktop: 3-column layout */}
+        <div className="hidden md:flex flex-1 overflow-hidden">
           {/* Shape Panel */}
           <div
             className="overflow-hidden flex flex-col"
@@ -104,19 +109,40 @@ export function Layout({ shapePanel, tangramPanel, resultPanel, inspectorPanel }
           </div>
         </div>
 
-        {/* Inspector Panel */}
-        {inspectorOpen && (
-          <>
-            <PanelResizer direction="vertical" onResize={handleInspectorResize} />
-            <div
-              className="flex-shrink-0 overflow-hidden"
-              style={{ height: inspectorHeight }}
-            >
-              {inspectorPanel}
-            </div>
-          </>
-        )}
+        {/* Mobile: Single panel based on activeTab */}
+        <div className="md:hidden flex-1 overflow-hidden pb-16">
+          {activeTab === 'Shape' && (
+            <div className="h-full overflow-hidden">{shapePanel}</div>
+          )}
+          {activeTab === 'Pattern' && (
+            <div className="h-full overflow-hidden">{tangramPanel}</div>
+          )}
+          {activeTab === 'Result' && (
+            <div className="h-full overflow-hidden">{resultPanel}</div>
+          )}
+          {activeTab === 'Inspector' && (
+            <div className="h-full overflow-hidden">{inspectorPanel}</div>
+          )}
+        </div>
+
+        {/* Desktop: Inspector Panel (bottom drawer) */}
+        <div className="hidden md:block">
+          {inspectorOpen && (
+            <>
+              <PanelResizer direction="vertical" onResize={handleInspectorResize} />
+              <div
+                className="flex-shrink-0 overflow-hidden"
+                style={{ height: inspectorHeight }}
+              >
+                {inspectorPanel}
+              </div>
+            </>
+          )}
+        </div>
       </div>
+
+      {/* Mobile: Bottom tab bar */}
+      <MobileTabBar />
     </div>
   );
 }

@@ -19,6 +19,7 @@ import type {
   SingularityMode,
   Singularity,
   LayoutMode,
+  ActiveTab,
   InspectorTab,
   SavedDesign,
 } from '../types';
@@ -84,6 +85,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     // Layout state
     layoutMode: 'Explore',
+    activeTab: 'Shape',
     inspectorOpen: true,
     inspectorTab: 'Optimization',
     exportModalOpen: false,
@@ -206,6 +208,10 @@ export const useAppStore = create<AppState>((set, get) => {
 
     setLayoutMode: (mode: LayoutMode) => {
       set({ layoutMode: mode });
+    },
+
+    setActiveTab: (tab: ActiveTab) => {
+      set({ activeTab: tab });
     },
 
     setInspectorOpen: (open: boolean) => {
