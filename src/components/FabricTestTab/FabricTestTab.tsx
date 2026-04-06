@@ -5,10 +5,10 @@ import { Button } from '../ui/Button';
 import { Slider } from '../ui/Slider';
 
 // Grid & simulation constants
-const RES = 20;                         // grid resolution
-const N = (RES + 1) * (RES + 1);        // vertex count = 441
-const SPACING = 1.0;
-const SUBSTEPS = 20;
+const RES = 40;                         // grid resolution (40x40 = smoother cloth)
+const N = (RES + 1) * (RES + 1);        // vertex count = 1681
+const SPACING = 0.5;                    // smaller spacing to keep same cloth size (20x20 units)
+const SUBSTEPS = 12;                    // slightly fewer substeps to compensate for more vertices
 const STRETCH_COMPLIANCE = 1e-8;        // stiff cloth
 const BEND_COMPLIANCE = 1e-4;           // resist folding
 const FLOOR_Y = 0.0;                    // table surface
