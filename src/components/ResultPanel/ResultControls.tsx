@@ -16,10 +16,43 @@ export function ResultControls() {
     setResultDisplayMode,
     showFront,
     setShowFront,
+    gary,
+    setGary,
   } = useAppStore();
 
   return (
     <div className="p-2 space-y-3 bg-[var(--bg-surface)] border-t border-[var(--border)]">
+      {/* Stitch Strength slider */}
+      <div className="space-y-1">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-medium text-[var(--text-secondary)]">Stitch Strength</span>
+          <span className="text-xs mono text-[var(--accent)]">{(1 - gary).toFixed(2)}</span>
+        </div>
+        <input
+          type="range"
+          min="0"
+          max="1"
+          step="0.01"
+          value={1 - gary}
+          onChange={(e) => setGary(1 - Number(e.target.value))}
+          className="w-full accent-[var(--accent)]"
+        />
+        <div className="flex justify-between text-[10px] text-[var(--text-muted)]">
+          <span>Flat</span>
+          <span>Full Smocking</span>
+        </div>
+      </div>
+
+      {/* Reset button */}
+      <Button
+        size="sm"
+        variant="secondary"
+        onClick={() => setGary(0)}
+        className="w-full"
+      >
+        🔄 Reset to Smocked
+      </Button>
+
       <Select
         label="Display Mode"
         options={DISPLAY_MODES}

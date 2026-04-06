@@ -65,7 +65,7 @@ export const useAppStore = create<AppState>((set, get) => {
     selectedPattern: defaultPattern,
     tilingU: defaultTilingU,
     tilingV: defaultTilingV,
-    gary: 1, // Start fully open
+    gary: 0, // Start fully smocked (simulation begins with stitches active)
     tiledPattern: initialTiledPattern,
     tangramState: initialTangram,
 
