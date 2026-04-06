@@ -4,29 +4,31 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Button } from '../ui/Button';
 import { Slider } from '../ui/Slider';
 
-// XPBD Cloth Simulation Constants
-const GRID_SIZE = 20; // 20x20 grid
-const NUM_VERTS = (GRID_SIZE + 1) * (GRID_SIZE + 1); // 21x21 = 441 vertices
-const CELL_SIZE = 1.0;
-const DT = 1 / 60;
-const SUBSTEPS = 8;
-const GRAVITY = new THREE.Vector3(0, -0.5, 0);
-const STRETCH_COMPLIANCE = 0.0;
-const BEND_COMPLIANCE = 1e-4;
+// Grid & simulation constants
+const RES = 20;                         // grid resolution
+const N = (RES + 1) * (RES + 1);        // vertex count = 441
+const SPACING = 1.0;
+const SUBSTEPS = 15;
+const DAMPING = 0.98;                   // damping applied to velocity per frame
+const STRETCH_COMPLIANCE = 1e-7;        // small but not zero for stability
+const BEND_COMPLIANCE = 1e-3;           // gentle bending resistance
+const FLOOR_Y = 0.0;                    // table surface
 
-interface StretchConstraint {
-  i: number;
-  j: number;
+// Distance constraint type
+interface DistConstraint {
+  a: number;
+  b: number;
   restLen: number;
+  compliance: number;
 }
 
-interface BendConstraint {
-  i: number;
-  j: number;
-  k: number;
-  l: number;
-  restAngle: number;
+// Convert grid (i, j) to vertex index
+function idx(i: number, j: number): number {
+  return j * (RES + 1) + i;
 }
+
+// State machine states
+type SimState = 'idle' | 'selected1' | 'ready' | 'stitching';
 
 export function FabricTestTab() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -38,285 +40,247 @@ export function FabricTestTab() {
   const clothMeshRef = useRef<THREE.Mesh | null>(null);
   const raycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster());
 
-  // Simulation state refs
-  const positionsRef = useRef<Float32Array>(new Float32Array(NUM_VERTS * 3));
-  const prevPositionsRef = useRef<Float32Array>(new Float32Array(NUM_VERTS * 3));
-  const velocitiesRef = useRef<Float32Array>(new Float32Array(NUM_VERTS * 3));
-  const invMassRef = useRef<Float32Array>(new Float32Array(NUM_VERTS));
-  const stretchConstraintsRef = useRef<StretchConstraint[]>([]);
-  const bendConstraintsRef = useRef<BendConstraint[]>([]);
+  // Position Verlet simulation arrays
+  const posRef = useRef<Float32Array>(new Float32Array(N * 3));
+  const prevRef = useRef<Float32Array>(new Float32Array(N * 3));
+  const constraintsRef = useRef<DistConstraint[]>([]);
 
   // Selection state
   const [pointA, setPointA] = useState<number | null>(null);
   const [pointB, setPointB] = useState<number | null>(null);
-  const [pullStrength, setPullStrength] = useState(0.8);
+  const [pullStrength, setPullStrength] = useState(0.5);
+  const [showWireframe, setShowWireframe] = useState(false);
   const sphereARef = useRef<THREE.Mesh | null>(null);
   const sphereBRef = useRef<THREE.Mesh | null>(null);
+  const wireframeMeshRef = useRef<THREE.LineSegments | null>(null);
 
-  // Initialize cloth positions
+  // Use refs for simulation to avoid stale closure issues
+  const pointARef = useRef<number | null>(null);
+  const pointBRef = useRef<number | null>(null);
+  const pullStrengthRef = useRef<number>(0.5);
+
+  // Keep refs in sync with state
+  useEffect(() => { pointARef.current = pointA; }, [pointA]);
+  useEffect(() => { pointBRef.current = pointB; }, [pointB]);
+  useEffect(() => { pullStrengthRef.current = pullStrength; }, [pullStrength]);
+
+  // Derive state machine state
+  const simState: SimState = pointA === null ? 'idle'
+    : pointB === null ? 'selected1'
+    : 'ready';
+
+  // Initialize cloth positions flat on table
   const initializeCloth = useCallback(() => {
-    const positions = positionsRef.current;
-    const prevPositions = prevPositionsRef.current;
-    const invMass = invMassRef.current;
-    const velocities = velocitiesRef.current;
+    const pos = posRef.current;
+    const prev = prevRef.current;
 
     // Center the cloth
-    const offset = (GRID_SIZE * CELL_SIZE) / 2;
+    const offset = (RES * SPACING) / 2;
 
-    for (let j = 0; j <= GRID_SIZE; j++) {
-      for (let i = 0; i <= GRID_SIZE; i++) {
-        const idx = j * (GRID_SIZE + 1) + i;
-        positions[idx * 3] = i * CELL_SIZE - offset;
-        positions[idx * 3 + 1] = 0;
-        positions[idx * 3 + 2] = j * CELL_SIZE - offset;
+    for (let j = 0; j <= RES; j++) {
+      for (let i = 0; i <= RES; i++) {
+        const v = idx(i, j);
+        pos[v * 3]     = i * SPACING - offset;  // x
+        pos[v * 3 + 1] = FLOOR_Y;                // y (on table)
+        pos[v * 3 + 2] = j * SPACING - offset;  // z
 
-        prevPositions[idx * 3] = positions[idx * 3];
-        prevPositions[idx * 3 + 1] = positions[idx * 3 + 1];
-        prevPositions[idx * 3 + 2] = positions[idx * 3 + 2];
-
-        velocities[idx * 3] = 0;
-        velocities[idx * 3 + 1] = 0;
-        velocities[idx * 3 + 2] = 0;
-
-        invMass[idx] = 1.0;
+        prev[v * 3]     = pos[v * 3];
+        prev[v * 3 + 1] = pos[v * 3 + 1];
+        prev[v * 3 + 2] = pos[v * 3 + 2];
       }
     }
   }, []);
 
-  // Build constraints
+  // Build distance constraints (stretch + bend)
   const buildConstraints = useCallback(() => {
-    const stretchConstraints: StretchConstraint[] = [];
-    const bendConstraints: BendConstraint[] = [];
-    const positions = positionsRef.current;
+    const constraints: DistConstraint[] = [];
+    const pos = posRef.current;
 
-    const getIdx = (i: number, j: number) => j * (GRID_SIZE + 1) + i;
-    const getDist = (a: number, b: number) => {
-      const dx = positions[b * 3] - positions[a * 3];
-      const dy = positions[b * 3 + 1] - positions[a * 3 + 1];
-      const dz = positions[b * 3 + 2] - positions[a * 3 + 2];
+    const getDist = (a: number, b: number): number => {
+      const dx = pos[b * 3] - pos[a * 3];
+      const dy = pos[b * 3 + 1] - pos[a * 3 + 1];
+      const dz = pos[b * 3 + 2] - pos[a * 3 + 2];
       return Math.sqrt(dx * dx + dy * dy + dz * dz);
     };
 
     // Stretch constraints: horizontal, vertical, and diagonal edges
-    for (let j = 0; j <= GRID_SIZE; j++) {
-      for (let i = 0; i <= GRID_SIZE; i++) {
-        const idx = getIdx(i, j);
+    for (let j = 0; j <= RES; j++) {
+      for (let i = 0; i <= RES; i++) {
+        const v = idx(i, j);
 
         // Horizontal edge
-        if (i < GRID_SIZE) {
-          const right = getIdx(i + 1, j);
-          stretchConstraints.push({ i: idx, j: right, restLen: getDist(idx, right) });
+        if (i < RES) {
+          const right = idx(i + 1, j);
+          constraints.push({ a: v, b: right, restLen: getDist(v, right), compliance: STRETCH_COMPLIANCE });
         }
 
         // Vertical edge
-        if (j < GRID_SIZE) {
-          const down = getIdx(i, j + 1);
-          stretchConstraints.push({ i: idx, j: down, restLen: getDist(idx, down) });
+        if (j < RES) {
+          const down = idx(i, j + 1);
+          constraints.push({ a: v, b: down, restLen: getDist(v, down), compliance: STRETCH_COMPLIANCE });
         }
 
         // Diagonal edges (shear)
-        if (i < GRID_SIZE && j < GRID_SIZE) {
-          const diagA = getIdx(i + 1, j + 1);
-          stretchConstraints.push({ i: idx, j: diagA, restLen: getDist(idx, diagA) });
+        if (i < RES && j < RES) {
+          const diagA = idx(i + 1, j + 1);
+          constraints.push({ a: v, b: diagA, restLen: getDist(v, diagA), compliance: STRETCH_COMPLIANCE });
 
-          const right = getIdx(i + 1, j);
-          const down = getIdx(i, j + 1);
-          stretchConstraints.push({ i: right, j: down, restLen: getDist(right, down) });
+          const right = idx(i + 1, j);
+          const down = idx(i, j + 1);
+          constraints.push({ a: right, b: down, restLen: getDist(right, down), compliance: STRETCH_COMPLIANCE });
         }
       }
     }
 
-    // Bend constraints: connect vertices across edges
-    for (let j = 0; j < GRID_SIZE; j++) {
-      for (let i = 0; i < GRID_SIZE; i++) {
-        // For each quad, we have bend constraints across the shared edge
-        const v0 = getIdx(i, j);
-        const v1 = getIdx(i + 1, j);
-        const v2 = getIdx(i + 1, j + 1);
-        const v3 = getIdx(i, j + 1);
+    // Bend constraints: cross constraints (i,j) to (i+2,j) and (i,j+2)
+    for (let j = 0; j <= RES; j++) {
+      for (let i = 0; i <= RES; i++) {
+        const v = idx(i, j);
 
-        // Bend constraint along diagonal v0-v2
-        bendConstraints.push({
-          i: v0,
-          j: v2,
-          k: v1,
-          l: v3,
-          restAngle: 0,
-        });
+        // Horizontal bend
+        if (i + 2 <= RES) {
+          const far = idx(i + 2, j);
+          constraints.push({ a: v, b: far, restLen: getDist(v, far), compliance: BEND_COMPLIANCE });
+        }
+
+        // Vertical bend
+        if (j + 2 <= RES) {
+          const far = idx(i, j + 2);
+          constraints.push({ a: v, b: far, restLen: getDist(v, far), compliance: BEND_COMPLIANCE });
+        }
       }
     }
 
-    stretchConstraintsRef.current = stretchConstraints;
-    bendConstraintsRef.current = bendConstraints;
+    constraintsRef.current = constraints;
   }, []);
 
-  // Solve stretch constraint
-  const solveStretch = useCallback(
-    (c: StretchConstraint, pos: Float32Array, compliance: number, dt: number) => {
-      const invMass = invMassRef.current;
-      const w = invMass[c.i] + invMass[c.j];
-      if (w === 0) return;
+  // Single simulation step (called every frame)
+  const simulate = useCallback(() => {
+    const pos = posRef.current;
+    const prev = prevRef.current;
+    const constraints = constraintsRef.current;
+    const pA = pointARef.current;
+    const pB = pointBRef.current;
+    const strength = pullStrengthRef.current;
 
-      const dx = pos[c.j * 3] - pos[c.i * 3];
-      const dy = pos[c.j * 3 + 1] - pos[c.i * 3 + 1];
-      const dz = pos[c.j * 3 + 2] - pos[c.i * 3 + 2];
-      const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (len === 0) return;
+    const dt = 1 / 60;
+    const subDt = dt / SUBSTEPS;
+    const subDt2 = subDt * subDt;
 
-      const alpha = compliance / (dt * dt);
-      const C = len - c.restLen;
-      const lambda = -C / (w + alpha);
-      const nx = dx / len,
-        ny = dy / len,
-        nz = dz / len;
+    for (let sub = 0; sub < SUBSTEPS; sub++) {
+      // 1. Verlet prediction: pos_new = pos + (pos - prev) * DAMPING
+      //    No gravity - cloth rests on table
+      for (let v = 0; v < N; v++) {
+        const vx = (pos[v * 3] - prev[v * 3]) * DAMPING;
+        const vy = (pos[v * 3 + 1] - prev[v * 3 + 1]) * DAMPING;
+        const vz = (pos[v * 3 + 2] - prev[v * 3 + 2]) * DAMPING;
 
-      pos[c.i * 3] -= invMass[c.i] * lambda * nx;
-      pos[c.i * 3 + 1] -= invMass[c.i] * lambda * ny;
-      pos[c.i * 3 + 2] -= invMass[c.i] * lambda * nz;
-      pos[c.j * 3] += invMass[c.j] * lambda * nx;
-      pos[c.j * 3 + 1] += invMass[c.j] * lambda * ny;
-      pos[c.j * 3 + 2] += invMass[c.j] * lambda * nz;
-    },
-    []
-  );
+        // Store current pos as prev
+        prev[v * 3] = pos[v * 3];
+        prev[v * 3 + 1] = pos[v * 3 + 1];
+        prev[v * 3 + 2] = pos[v * 3 + 2];
 
-  // Solve bend constraint (simplified dihedral)
-  const solveBend = useCallback(
-    (c: BendConstraint, pos: Float32Array, compliance: number, dt: number) => {
-      const invMass = invMassRef.current;
+        // Predict new position
+        pos[v * 3] += vx;
+        pos[v * 3 + 1] += vy;
+        pos[v * 3 + 2] += vz;
+      }
 
-      // Simplified bend: just keep the distance between diagonal vertices
-      const dx = pos[c.k * 3] - pos[c.l * 3];
-      const dy = pos[c.k * 3 + 1] - pos[c.l * 3 + 1];
-      const dz = pos[c.k * 3 + 2] - pos[c.l * 3 + 2];
-      const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      // 2. Solve distance constraints (stretch + bend)
+      for (const c of constraints) {
+        const dx = pos[c.b * 3] - pos[c.a * 3];
+        const dy = pos[c.b * 3 + 1] - pos[c.a * 3 + 1];
+        const dz = pos[c.b * 3 + 2] - pos[c.a * 3 + 2];
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist === 0) continue;
 
-      // Rest length for diagonal
-      const restLen = CELL_SIZE * Math.SQRT2;
+        // XPBD: alpha = compliance / (dt^2 * w), where w = w_a + w_b = 1
+        const alpha = c.compliance / subDt2;
+        const C = dist - c.restLen;
+        const lambda = -C / (1.0 + alpha);
 
-      const w = invMass[c.k] + invMass[c.l];
-      if (w === 0 || len === 0) return;
+        // Normalize direction
+        const nx = dx / dist;
+        const ny = dy / dist;
+        const nz = dz / dist;
 
-      const alpha = compliance / (dt * dt);
-      const C = len - restLen;
-      const lambda = -C / (w + alpha);
-      const nx = dx / len,
-        ny = dy / len,
-        nz = dz / len;
+        // Apply correction (w_a = w_b = 0.5)
+        const correction = lambda * 0.5;
+        pos[c.a * 3] -= correction * nx;
+        pos[c.a * 3 + 1] -= correction * ny;
+        pos[c.a * 3 + 2] -= correction * nz;
+        pos[c.b * 3] += correction * nx;
+        pos[c.b * 3 + 1] += correction * ny;
+        pos[c.b * 3 + 2] += correction * nz;
+      }
 
-      const scale = 0.1; // Softer bending effect
-      pos[c.k * 3] -= invMass[c.k] * lambda * nx * scale;
-      pos[c.k * 3 + 1] -= invMass[c.k] * lambda * ny * scale;
-      pos[c.k * 3 + 2] -= invMass[c.k] * lambda * nz * scale;
-      pos[c.l * 3] += invMass[c.l] * lambda * nx * scale;
-      pos[c.l * 3 + 1] += invMass[c.l] * lambda * ny * scale;
-      pos[c.l * 3 + 2] += invMass[c.l] * lambda * nz * scale;
-    },
-    []
-  );
+      // 3. Solve stitch constraint (pull points toward each other)
+      if (pA !== null && pB !== null && strength > 0) {
+        // Calculate midpoint (keep above floor)
+        const midX = (pos[pA * 3] + pos[pB * 3]) / 2;
+        const midY = Math.max(FLOOR_Y, (pos[pA * 3 + 1] + pos[pB * 3 + 1]) / 2);
+        const midZ = (pos[pA * 3 + 2] + pos[pB * 3 + 2]) / 2;
 
-  // Apply stitch constraint (pull points together)
-  const applyStitch = useCallback(
-    (pA: number, pB: number, strength: number, pos: Float32Array) => {
-      if (strength <= 0) return;
+        // Stitch compliance: lower = stiffer. strength 1 = very stiff, strength 0 = no pull
+        const stitchCompliance = (1.0 - strength) * 0.01 + 1e-8;
+        const stitchAlpha = stitchCompliance / subDt2;
 
-      const midX = (pos[pA * 3] + pos[pB * 3]) / 2;
-      const midY = (pos[pA * 3 + 1] + pos[pB * 3 + 1]) / 2;
-      const midZ = (pos[pA * 3 + 2] + pos[pB * 3 + 2]) / 2;
-
-      pos[pA * 3] += (midX - pos[pA * 3]) * strength;
-      pos[pA * 3 + 1] += (midY - pos[pA * 3 + 1]) * strength;
-      pos[pA * 3 + 2] += (midZ - pos[pA * 3 + 2]) * strength;
-      pos[pB * 3] += (midX - pos[pB * 3]) * strength;
-      pos[pB * 3 + 1] += (midY - pos[pB * 3 + 1]) * strength;
-      pos[pB * 3 + 2] += (midZ - pos[pB * 3 + 2]) * strength;
-    },
-    []
-  );
-
-  // XPBD simulation step
-  const simulate = useCallback(
-    (pA: number | null, pB: number | null, strength: number) => {
-      const pos = positionsRef.current;
-      const prevPos = prevPositionsRef.current;
-      const vel = velocitiesRef.current;
-      const invMass = invMassRef.current;
-      const stretchConstraints = stretchConstraintsRef.current;
-      const bendConstraints = bendConstraintsRef.current;
-
-      const subDt = DT / SUBSTEPS;
-
-      for (let sub = 0; sub < SUBSTEPS; sub++) {
-        // Apply gravity and integrate
-        for (let i = 0; i < NUM_VERTS; i++) {
-          if (invMass[i] === 0) continue;
-
-          vel[i * 3] += GRAVITY.x * subDt;
-          vel[i * 3 + 1] += GRAVITY.y * subDt;
-          vel[i * 3 + 2] += GRAVITY.z * subDt;
-
-          // Damping
-          vel[i * 3] *= 0.99;
-          vel[i * 3 + 1] *= 0.99;
-          vel[i * 3 + 2] *= 0.99;
-
-          prevPos[i * 3] = pos[i * 3];
-          prevPos[i * 3 + 1] = pos[i * 3 + 1];
-          prevPos[i * 3 + 2] = pos[i * 3 + 2];
-
-          pos[i * 3] += vel[i * 3] * subDt;
-          pos[i * 3 + 1] += vel[i * 3 + 1] * subDt;
-          pos[i * 3 + 2] += vel[i * 3 + 2] * subDt;
+        // Pull point A toward mid
+        {
+          const dx = midX - pos[pA * 3];
+          const dy = midY - pos[pA * 3 + 1];
+          const dz = midZ - pos[pA * 3 + 2];
+          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          if (dist > 0.001) {
+            const C = dist;  // want distance to be 0
+            const lambda = -C / (1.0 + stitchAlpha);
+            const corr = -lambda;  // negative because we want to move toward mid
+            pos[pA * 3] += corr * (dx / dist);
+            pos[pA * 3 + 1] += corr * (dy / dist);
+            pos[pA * 3 + 2] += corr * (dz / dist);
+          }
         }
 
-        // Solve constraints
-        for (const c of stretchConstraints) {
-          solveStretch(c, pos, STRETCH_COMPLIANCE, subDt);
-        }
-
-        for (const c of bendConstraints) {
-          solveBend(c, pos, BEND_COMPLIANCE, subDt);
-        }
-
-        // Apply stitch constraint
-        if (pA !== null && pB !== null) {
-          applyStitch(pA, pB, strength, pos);
-        }
-
-        // Update velocities
-        for (let i = 0; i < NUM_VERTS; i++) {
-          if (invMass[i] === 0) continue;
-
-          vel[i * 3] = (pos[i * 3] - prevPos[i * 3]) / subDt;
-          vel[i * 3 + 1] = (pos[i * 3 + 1] - prevPos[i * 3 + 1]) / subDt;
-          vel[i * 3 + 2] = (pos[i * 3 + 2] - prevPos[i * 3 + 2]) / subDt;
-        }
-
-        // Floor collision
-        for (let i = 0; i < NUM_VERTS; i++) {
-          if (pos[i * 3 + 1] < -5) {
-            pos[i * 3 + 1] = -5;
-            vel[i * 3 + 1] = 0;
+        // Pull point B toward mid
+        {
+          const dx = midX - pos[pB * 3];
+          const dy = midY - pos[pB * 3 + 1];
+          const dz = midZ - pos[pB * 3 + 2];
+          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          if (dist > 0.001) {
+            const C = dist;
+            const lambda = -C / (1.0 + stitchAlpha);
+            const corr = -lambda;
+            pos[pB * 3] += corr * (dx / dist);
+            pos[pB * 3 + 1] += corr * (dy / dist);
+            pos[pB * 3 + 2] += corr * (dz / dist);
           }
         }
       }
-    },
-    [solveStretch, solveBend, applyStitch]
-  );
+
+      // 4. Floor constraint: y >= FLOOR_Y (table surface)
+      for (let v = 0; v < N; v++) {
+        if (pos[v * 3 + 1] < FLOOR_Y) {
+          pos[v * 3 + 1] = FLOOR_Y;
+          prev[v * 3 + 1] = FLOOR_Y;  // kill vertical velocity at floor
+        }
+      }
+    }
+  }, []);
 
   // Create cloth geometry
   const createClothGeometry = useCallback(() => {
     const geometry = new THREE.BufferGeometry();
-    const positions = positionsRef.current;
+    const positions = posRef.current;
 
     // Create indices for triangle mesh
     const indices: number[] = [];
-    for (let j = 0; j < GRID_SIZE; j++) {
-      for (let i = 0; i < GRID_SIZE; i++) {
-        const v0 = j * (GRID_SIZE + 1) + i;
-        const v1 = v0 + 1;
-        const v2 = v0 + (GRID_SIZE + 1);
-        const v3 = v2 + 1;
+    for (let j = 0; j < RES; j++) {
+      for (let i = 0; i < RES; i++) {
+        const v0 = idx(i, j);
+        const v1 = idx(i + 1, j);
+        const v2 = idx(i, j + 1);
+        const v3 = idx(i + 1, j + 1);
 
         indices.push(v0, v2, v1);
         indices.push(v1, v2, v3);
@@ -336,82 +300,93 @@ export function FabricTestTab() {
 
     const geometry = clothMeshRef.current.geometry;
     const positionAttr = geometry.getAttribute('position') as THREE.BufferAttribute;
-    positionAttr.array.set(positionsRef.current);
+    positionAttr.array.set(posRef.current);
     positionAttr.needsUpdate = true;
     geometry.computeVertexNormals();
+
+    // Update wireframe if visible
+    if (wireframeMeshRef.current) {
+      const wfGeom = wireframeMeshRef.current.geometry as THREE.BufferGeometry;
+      const wfPosAttr = wfGeom.getAttribute('position') as THREE.BufferAttribute;
+      wfPosAttr.array.set(posRef.current);
+      wfPosAttr.needsUpdate = true;
+    }
   }, []);
 
   // Update selection spheres
   const updateSelectionSpheres = useCallback(() => {
-    const pos = positionsRef.current;
+    const pos = posRef.current;
+    const pA = pointARef.current;
+    const pB = pointBRef.current;
 
-    if (sphereARef.current && pointA !== null) {
-      sphereARef.current.position.set(
-        pos[pointA * 3],
-        pos[pointA * 3 + 1],
-        pos[pointA * 3 + 2]
-      );
-      sphereARef.current.visible = true;
-    } else if (sphereARef.current) {
-      sphereARef.current.visible = false;
+    if (sphereARef.current) {
+      if (pA !== null) {
+        sphereARef.current.position.set(
+          pos[pA * 3],
+          pos[pA * 3 + 1] + 0.15,  // slightly above cloth
+          pos[pA * 3 + 2]
+        );
+        sphereARef.current.visible = true;
+      } else {
+        sphereARef.current.visible = false;
+      }
     }
 
-    if (sphereBRef.current && pointB !== null) {
-      sphereBRef.current.position.set(
-        pos[pointB * 3],
-        pos[pointB * 3 + 1],
-        pos[pointB * 3 + 2]
-      );
-      sphereBRef.current.visible = true;
-    } else if (sphereBRef.current) {
-      sphereBRef.current.visible = false;
+    if (sphereBRef.current) {
+      if (pB !== null) {
+        sphereBRef.current.position.set(
+          pos[pB * 3],
+          pos[pB * 3 + 1] + 0.15,
+          pos[pB * 3 + 2]
+        );
+        sphereBRef.current.visible = true;
+      } else {
+        sphereBRef.current.visible = false;
+      }
     }
-  }, [pointA, pointB]);
+  }, []);
 
   // Handle click for point selection
-  const handleClick = useCallback(
-    (event: MouseEvent) => {
-      if (!containerRef.current || !clothMeshRef.current || !cameraRef.current) return;
+  const handleClick = useCallback((event: MouseEvent) => {
+    if (!containerRef.current || !clothMeshRef.current || !cameraRef.current) return;
 
-      const rect = containerRef.current.getBoundingClientRect();
-      const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-      const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    const rect = containerRef.current.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
-      raycasterRef.current.setFromCamera(new THREE.Vector2(x, y), cameraRef.current);
+    raycasterRef.current.setFromCamera(new THREE.Vector2(x, y), cameraRef.current);
 
-      const intersects = raycasterRef.current.intersectObject(clothMeshRef.current);
+    const intersects = raycasterRef.current.intersectObject(clothMeshRef.current);
 
-      if (intersects.length > 0) {
-        const face = intersects[0].face;
-        if (!face) return;
+    if (intersects.length > 0) {
+      const face = intersects[0].face;
+      if (!face) return;
 
-        // Find closest vertex to intersection point
-        const point = intersects[0].point;
-        const pos = positionsRef.current;
+      // Find closest vertex to intersection point
+      const point = intersects[0].point;
+      const pos = posRef.current;
 
-        let closestVert = face.a;
-        let closestDist = Infinity;
+      let closestVert = face.a;
+      let closestDist = Infinity;
 
-        for (const v of [face.a, face.b, face.c]) {
-          const dx = pos[v * 3] - point.x;
-          const dy = pos[v * 3 + 1] - point.y;
-          const dz = pos[v * 3 + 2] - point.z;
-          const dist = dx * dx + dy * dy + dz * dz;
-          if (dist < closestDist) {
-            closestDist = dist;
-            closestVert = v;
-          }
-        }
-
-        if (pointA === null) {
-          setPointA(closestVert);
-        } else if (pointB === null && closestVert !== pointA) {
-          setPointB(closestVert);
+      for (const v of [face.a, face.b, face.c]) {
+        const dx = pos[v * 3] - point.x;
+        const dy = pos[v * 3 + 1] - point.y;
+        const dz = pos[v * 3 + 2] - point.z;
+        const dist = dx * dx + dy * dy + dz * dz;
+        if (dist < closestDist) {
+          closestDist = dist;
+          closestVert = v;
         }
       }
-    },
-    [pointA, pointB]
-  );
+
+      if (pointARef.current === null) {
+        setPointA(closestVert);
+      } else if (pointBRef.current === null && closestVert !== pointARef.current) {
+        setPointB(closestVert);
+      }
+    }
+  }, []);
 
   // Reset simulation
   const handleReset = useCallback(() => {
@@ -420,6 +395,18 @@ export function FabricTestTab() {
     initializeCloth();
     buildConstraints();
   }, [initializeCloth, buildConstraints]);
+
+  // Toggle wireframe
+  const handleToggleWireframe = useCallback(() => {
+    setShowWireframe(prev => !prev);
+  }, []);
+
+  // Update wireframe visibility
+  useEffect(() => {
+    if (wireframeMeshRef.current) {
+      wireframeMeshRef.current.visible = showWireframe;
+    }
+  }, [showWireframe]);
 
   // Initialize Three.js scene
   useEffect(() => {
@@ -434,9 +421,9 @@ export function FabricTestTab() {
     scene.background = new THREE.Color(0x1a1d24);
     sceneRef.current = scene;
 
-    // Camera
+    // Camera - top-down view of table
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
-    camera.position.set(15, 15, 15);
+    camera.position.set(0, 20, 15);
     camera.lookAt(0, 0, 0);
     cameraRef.current = camera;
 
@@ -453,10 +440,11 @@ export function FabricTestTab() {
     controls.dampingFactor = 0.05;
     controls.minDistance = 5;
     controls.maxDistance = 50;
+    controls.target.set(0, 0, 0);
     controlsRef.current = controls;
 
     // Lights
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
     scene.add(ambientLight);
 
     const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
@@ -467,9 +455,21 @@ export function FabricTestTab() {
     directionalLight2.position.set(-10, 10, -10);
     scene.add(directionalLight2);
 
-    // Grid helper
-    const gridHelper = new THREE.GridHelper(30, 30, 0x2a2e35, 0x2a2e35);
-    gridHelper.position.y = -5;
+    // Table surface (subtle gray plane)
+    const tableGeom = new THREE.PlaneGeometry(30, 30);
+    const tableMat = new THREE.MeshPhongMaterial({
+      color: 0x2a2e35,
+      side: THREE.DoubleSide,
+      shininess: 10
+    });
+    const tableMesh = new THREE.Mesh(tableGeom, tableMat);
+    tableMesh.rotation.x = -Math.PI / 2;
+    tableMesh.position.y = FLOOR_Y - 0.01;
+    scene.add(tableMesh);
+
+    // Grid helper on table
+    const gridHelper = new THREE.GridHelper(30, 30, 0x3a3e45, 0x3a3e45);
+    gridHelper.position.y = FLOOR_Y + 0.001;
     scene.add(gridHelper);
 
     // Initialize cloth
@@ -479,16 +479,27 @@ export function FabricTestTab() {
     // Create cloth mesh
     const geometry = createClothGeometry();
     const material = new THREE.MeshPhongMaterial({
-      color: 0xf5e6d3,
+      color: 0xF5F0E8,  // light cream
       side: THREE.DoubleSide,
-      flatShading: false,
+      shininess: 30,
     });
     const clothMesh = new THREE.Mesh(geometry, material);
+    clothMesh.position.y = 0.01;  // slightly above table to avoid z-fighting
     scene.add(clothMesh);
     clothMeshRef.current = clothMesh;
 
+    // Wireframe overlay
+    const wireframeGeom = new THREE.BufferGeometry();
+    wireframeGeom.setAttribute('position', new THREE.BufferAttribute(posRef.current.slice(), 3));
+    const wireEdges = new THREE.WireframeGeometry(geometry);
+    const wireframeMat = new THREE.LineBasicMaterial({ color: 0x666666, transparent: true, opacity: 0.5 });
+    const wireframeMesh = new THREE.LineSegments(wireEdges, wireframeMat);
+    wireframeMesh.visible = false;
+    scene.add(wireframeMesh);
+    wireframeMeshRef.current = wireframeMesh;
+
     // Selection spheres
-    const sphereGeometry = new THREE.SphereGeometry(0.3, 16, 16);
+    const sphereGeometry = new THREE.SphereGeometry(0.25, 16, 16);
     const sphereAMat = new THREE.MeshBasicMaterial({ color: 0xff8c00 }); // Orange
     const sphereBMat = new THREE.MeshBasicMaterial({ color: 0x4a90d9 }); // Blue
 
@@ -502,9 +513,21 @@ export function FabricTestTab() {
     scene.add(sphereB);
     sphereBRef.current = sphereB;
 
-    // Animation loop
+    // Single animation loop (simulation + render)
     const animate = () => {
       animationIdRef.current = requestAnimationFrame(animate);
+
+      // Simulate physics
+      simulate();
+
+      // Update mesh and spheres
+      updateClothMesh();
+      updateSelectionSpheres();
+
+      // Note: WireframeGeometry doesn't update easily with position changes
+      // The wireframe is static; for dynamic wireframe, would need to recreate geometry each frame
+
+      // Render
       controls.update();
       renderer.render(scene, camera);
     };
@@ -543,28 +566,7 @@ export function FabricTestTab() {
         }
       });
     };
-  }, [initializeCloth, buildConstraints, createClothGeometry]);
-
-  // Simulation loop
-  useEffect(() => {
-    let running = true;
-
-    const simLoop = () => {
-      if (!running) return;
-
-      simulate(pointA, pointB, pullStrength);
-      updateClothMesh();
-      updateSelectionSpheres();
-
-      requestAnimationFrame(simLoop);
-    };
-
-    simLoop();
-
-    return () => {
-      running = false;
-    };
-  }, [simulate, updateClothMesh, updateSelectionSpheres, pointA, pointB, pullStrength]);
+  }, [initializeCloth, buildConstraints, createClothGeometry, simulate, updateClothMesh, updateSelectionSpheres]);
 
   // Click handler
   useEffect(() => {
@@ -575,6 +577,20 @@ export function FabricTestTab() {
     return () => container.removeEventListener('click', handleClick);
   }, [handleClick]);
 
+  // Get instruction text based on state
+  const getInstructionText = () => {
+    switch (simState) {
+      case 'idle':
+        return 'Click 2 points on the cloth';
+      case 'selected1':
+        return 'Now click second point';
+      case 'ready':
+        return 'Adjust Pull Strength slider';
+      default:
+        return '';
+    }
+  };
+
   return (
     <div className="relative w-full h-full bg-[var(--bg-darkest)]">
       <div ref={containerRef} className="w-full h-full" />
@@ -582,14 +598,10 @@ export function FabricTestTab() {
       {/* Instructions overlay */}
       <div className="absolute top-4 left-4 bg-[var(--bg-panel)] bg-opacity-90 p-4 rounded-lg shadow-lg max-w-xs">
         <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-2">
-          Fabric Test
+          Cloth on Table
         </h3>
         <p className="text-xs text-[var(--text-secondary)] mb-3">
-          {pointA === null
-            ? 'Click on the cloth to select the first point (orange)'
-            : pointB === null
-              ? 'Click to select the second point (blue)'
-              : 'Points are being pulled together!'}
+          {getInstructionText()}
         </p>
 
         <div className="space-y-3">
@@ -602,9 +614,14 @@ export function FabricTestTab() {
             onChange={setPullStrength}
           />
 
-          <Button onClick={handleReset} variant="secondary" size="sm" className="w-full">
-            Reset
-          </Button>
+          <div className="flex gap-2">
+            <Button onClick={handleReset} variant="secondary" size="sm" className="flex-1">
+              Reset
+            </Button>
+            <Button onClick={handleToggleWireframe} variant="secondary" size="sm" className="flex-1">
+              {showWireframe ? 'Hide Grid' : 'Show Grid'}
+            </Button>
+          </div>
         </div>
 
         {/* Point info */}
@@ -626,6 +643,13 @@ export function FabricTestTab() {
             </div>
           </div>
         )}
+
+        {/* State indicator */}
+        <div className="mt-2 pt-2 border-t border-[var(--border)]">
+          <div className="text-xs text-[var(--text-muted)]">
+            State: <span className="text-[var(--text-secondary)]">{simState}</span>
+          </div>
+        </div>
       </div>
     </div>
   );
