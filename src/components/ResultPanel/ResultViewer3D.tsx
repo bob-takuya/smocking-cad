@@ -1,20 +1,20 @@
 /**
- * ResultViewer3D — Real-time Verlet+XPBD cloth simulation
- *
- * Physics validated by headless tests (test_smocking3.mjs):
- *   xpbdBend2 config: stretchC=1e-5, bendC=1e-3, stitchC=1e-4
- *   → vel=0.00 at f480, zRange=4.23 (deep smocking folds) ✅
+ * ResultViewer3D — Cloth simulation: flat cloth on table, pinched upward at stitch points
  *
  * Coordinate system:
- *   - Cloth hangs in XY plane (pole = X axis, cloth hangs in -Y)
- *   - Z = fold direction (perpendicular to cloth)
- *   - Small Z-noise breaks symmetry → folds form naturally
- *   - Top row (min pattern-y) pinned to pole
+ *   - Cloth lies flat in XZ plane (Y=0 is table surface)
+ *   - world X = pattern.x, world Z = pattern.y, world Y = 0 + tiny noise
+ *   - NO pinned vertices (eliminates the "fixed edge can't fold" problem)
+ *   - Center-of-mass XZ correction prevents cloth from drifting
+ *   - Floor constraint (Y >= 0) forces excess fabric upward
  *
- * Stitch constraint:
- *   - XPBD distance constraint with restLen=0 (NOT lerp/weld)
- *   - Compliance based on gary: gary=0 → stiff (full stitch), gary=1 → soft (open)
- *   - No energy injection; converges to equilibrium naturally
+ * Stitch physics:
+ *   - XPBD distance constraint (restLen=0) pulls stitch groups together in 3D
+ *   - Stitch vertices + excess fabric forced up through floor constraint
+ *   - gary=0 → stiff stitch (cloth pinched up), gary=1 → no stitch (flat cloth)
+ *
+ * Validated by test_table.mjs:
+ *   base config: maxY=5.4, vel=0.88 at f480, stitchDist=0.15 (92% closure) ✅
  */
 
 import { useEffect, useRef } from 'react';
@@ -24,13 +24,12 @@ import { useAppStore } from '../../store/useAppStore';
 import type { TiledPattern } from '../../types';
 
 // ── Physics constants ─────────────────────────────────────────────────────────
-const SUBSTEPS    = 20;
-const GRAVITY     = -3.0;        // light gravity for gentle sag
-const VDAMP       = 0.998;       // Verlet damping per substep
-const STRETCH_C   = 1e-5;        // structural compliance (soft enough for stitch to work)
-const BEND_C      = 1e-3;        // bending compliance (stiffer = deeper folds)
-const TOP_EPS     = 0.01;        // tolerance for top-row pin detection
-const Z_NOISE     = 0.05;        // initial Z perturbation to seed fold direction
+const SUBSTEPS  = 20;
+const GRAVITY   = -1.0;   // light gravity: non-stitched parts stay near table
+const VDAMP     = 0.998;  // Verlet damping per substep
+const STRETCH_C = 1e-5;   // structural compliance (soft enough for stitch to work)
+const BEND_C    = 1e-3;   // bending compliance
+const Y_NOISE   = 0.02;   // initial Y perturbation (seeds upward fold direction)
 
 interface Con { a: number; b: number; r: number; c: number }
 
@@ -45,32 +44,39 @@ function buildCloth(pattern: TiledPattern) {
   const prev = new Float32Array(N * 3);
   const w    = new Float32Array(N);
 
-  // Find min Y in pattern space (= top row)
-  let minY = Infinity, maxY = -Infinity, minX = Infinity, maxX = -Infinity;
+  // Compute cloth bounds and center (for camera + COM correction)
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
   for (const v of verts) {
-    minY = Math.min(minY, v.y); maxY = Math.max(maxY, v.y);
     minX = Math.min(minX, v.x); maxX = Math.max(maxX, v.x);
+    minZ = Math.min(minZ, v.y); maxZ = Math.max(maxZ, v.y);
   }
+  const centerX = (minX + maxX) / 2;
+  const centerZ = (minZ + maxZ) / 2;
+  const clothW  = maxX - minX;
+  const clothH  = maxZ - minZ;
 
+  // Initialize: flat in XZ plane with tiny positive Y noise
   for (let i = 0; i < N; i++) {
-    pos[i*3]   = verts[i].x;                          // X: horizontal (parallel to pole)
-    pos[i*3+1] = -(verts[i].y - minY);               // Y: hanging downward from 0
-    pos[i*3+2] = (Math.random() - 0.5) * Z_NOISE;    // Z: fold direction + noise
+    pos[i*3]   = verts[i].x;
+    pos[i*3+1] = Math.random() * Y_NOISE;  // tiny Y (seeds upward fold)
+    pos[i*3+2] = verts[i].y;
     prev[i*3]   = pos[i*3];
     prev[i*3+1] = pos[i*3+1];
     prev[i*3+2] = pos[i*3+2];
-    w[i] = (verts[i].y - minY) < TOP_EPS ? 0 : 1;    // pin top row
+    w[i] = 1; // NO pinned vertices
   }
 
-  // Structural constraints from edges
+  // Structural constraints (skip stitch-type edges)
   const cons: Con[] = [];
   const seen = new Set<string>();
   const addEdge = (a: number, b: number, c: number) => {
     const k = a < b ? `${a}-${b}` : `${b}-${a}`;
     if (seen.has(k)) return;
     seen.add(k);
-    const dx = pos[b*3] - pos[a*3], dy = pos[b*3+1] - pos[a*3+1];
-    const r = Math.sqrt(dx*dx + dy*dy);   // rest length from initial XY (ignore Z noise)
+    // Rest length from XZ distance only (initial flat state)
+    const dx = verts[b].x - verts[a].x;
+    const dz = verts[b].y - verts[a].y;
+    const r = Math.sqrt(dx*dx + dz*dz);
     if (r < 1e-6) return;
     cons.push({ a, b, r, c });
   };
@@ -80,37 +86,46 @@ function buildCloth(pattern: TiledPattern) {
     addEdge(edge.a, edge.b, STRETCH_C);
   }
 
-  // Bend (skip-1) constraints
+  // Bend (skip-1) constraints via grid indices
   for (let j = 0; j < ny; j++) {
     for (let i = 0; i < nx; i++) {
       const v = j * nx + i;
-      if (i + 2 < nx) addEdge(v, j * nx + (i + 2), BEND_C);
-      if (j + 2 < ny) addEdge(v, (j + 2) * nx + i, BEND_C);
+      if (v >= N) continue;
+      if (i + 2 < nx && j * nx + (i + 2) < N) addEdge(v, j * nx + (i + 2), BEND_C);
+      if (j + 2 < ny && (j + 2) * nx + i < N)  addEdge(v, (j + 2) * nx + i, BEND_C);
     }
   }
 
-  // Build triangle index list
+  // Stitch constraints (restLen=0) from stitchingLines
+  const stCons: Con[] = [];
+  for (const group of pattern.stitchingLines) {
+    for (let a = 0; a < group.length - 1; a++) {
+      for (let b = a + 1; b < group.length; b++) {
+        if (group[a] < N && group[b] < N) {
+          stCons.push({ a: group[a], b: group[b], r: 0, c: 1e-4 });
+        }
+      }
+    }
+  }
+
+  // Build triangle mesh
   const indices: number[] = [];
   for (const face of pattern.faces) {
     if (face.vertices.length === 3) indices.push(...face.vertices);
   }
 
-  // Vertex colors (underlay=blue, pleat=pink)
+  // Vertex colors
   const colors = new Float32Array(N * 3);
   for (let i = 0; i < N; i++) {
     if (verts[i].type === 'underlay') {
-      colors[i*3] = 0.29; colors[i*3+1] = 0.56; colors[i*3+2] = 0.85;
+      colors[i*3] = 0.30; colors[i*3+1] = 0.58; colors[i*3+2] = 0.88;  // blue
     } else {
-      colors[i*3] = 0.91; colors[i*3+1] = 0.40; colors[i*3+2] = 0.60;
+      colors[i*3] = 0.95; colors[i*3+1] = 0.45; colors[i*3+2] = 0.65;  // pink
     }
   }
 
-  const clothWidth  = maxX - minX;
-  const clothHeight = maxY - minY;
-  const centerX = minX + clothWidth  / 2;
-  const centerY = clothHeight / 2;  // world Y center (hangs from 0 to -clothHeight)
-
-  return { N, pos, prev, w, cons, indices, colors, clothWidth, clothHeight, centerX, centerY };
+  return { N, pos, prev, w, cons, stCons, indices, colors,
+           clothW, clothH, centerX, centerZ };
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -118,38 +133,41 @@ export function ResultViewer3D() {
   const { containerRef, scene, camera, controls } = useThreeScene();
   const { tiledPattern, gary } = useAppStore();
 
-  // Sync gary to ref (avoid stale closure in RAF)
   const garyRef = useRef(gary);
   useEffect(() => { garyRef.current = gary; }, [gary]);
 
-  // Simulation state
   const posRef   = useRef<Float32Array | null>(null);
   const prevRef  = useRef<Float32Array | null>(null);
   const wRef     = useRef<Float32Array | null>(null);
   const consRef  = useRef<Con[]>([]);
-  const stConRef = useRef<Con[]>([]);   // stitch constraints (restLen=0, compliance varies)
+  const stConRef = useRef<Con[]>([]);
+  const nRef     = useRef(0);
+  const cx0Ref   = useRef(0);  // original center X
+  const cz0Ref   = useRef(0);  // original center Z
   const clothRef = useRef<THREE.Mesh | null>(null);
   const rafRef   = useRef<number | null>(null);
-  const nRef     = useRef(0);
 
   // ── Simulation step ────────────────────────────────────────────────────────
   const step = () => {
-    const pos    = posRef.current;
-    const prev   = prevRef.current;
-    const w      = wRef.current;
-    const cons   = consRef.current;
-    const stCons = stConRef.current;
+    const pos  = posRef.current;
+    const prev = prevRef.current;
+    const w    = wRef.current;
+    const cons = consRef.current;
+    const st   = stConRef.current;
     if (!pos || !prev || !w || nRef.current === 0) return;
 
     const N     = nRef.current;
     const subDt = (1 / 60) / SUBSTEPS;
     const sd2   = subDt * subDt;
+    const cx0   = cx0Ref.current;
+    const cz0   = cz0Ref.current;
 
-    // Stitch compliance from gary: gary=0 → stiff (1e-4), gary=1 → very soft (disabled)
+    // gary=0 → strong stitch (stitchC small); gary=1 → minimal stitch
     const stitchC = Math.pow(garyRef.current, 2) * 0.5 + 1e-4;
+    const doStitch = garyRef.current < 0.99;
 
     for (let sub = 0; sub < SUBSTEPS; sub++) {
-      // Verlet predict
+      // 1. Verlet predict with gravity
       for (let v = 0; v < N; v++) {
         if (w[v] === 0) continue;
         const vx = (pos[v*3]   - prev[v*3])   * VDAMP;
@@ -163,7 +181,15 @@ export function ResultViewer3D() {
         pos[v*3+2] += vz;
       }
 
-      // XPBD structural constraints
+      // 2. Floor constraint: Y >= 0 (table surface)
+      for (let v = 0; v < N; v++) {
+        if (pos[v*3+1] < 0) {
+          pos[v*3+1] = 0;
+          if (prev[v*3+1] > 0) prev[v*3+1] = 0;  // stop downward velocity
+        }
+      }
+
+      // 3. Structural constraints (XPBD)
       for (const c of cons) {
         const wa = w[c.a], wb = w[c.b], wS = wa + wb;
         if (wS === 0) continue;
@@ -182,9 +208,9 @@ export function ResultViewer3D() {
         pos[c.b*3+2] += wb * lam * nz;
       }
 
-      // XPBD stitch constraints (restLen=0, varying compliance)
-      if (garyRef.current < 0.99) {
-        for (const c of stCons) {
+      // 4. Stitch constraints (XPBD, restLen=0)
+      if (doStitch) {
+        for (const c of st) {
           const wa = w[c.a], wb = w[c.b], wS = wa + wb;
           if (wS === 0) continue;
           const dx = pos[c.b*3]   - pos[c.a*3];
@@ -192,7 +218,7 @@ export function ResultViewer3D() {
           const dz = pos[c.b*3+2] - pos[c.a*3+2];
           const d  = Math.sqrt(dx*dx + dy*dy + dz*dz);
           if (d < 1e-6) continue;
-          const lam = -d / (wS + stitchC / sd2);  // restLen=0: C = d
+          const lam = -d / (wS + stitchC / sd2);
           const nx = dx/d, ny = dy/d, nz = dz/d;
           pos[c.a*3]   -= wa * lam * nx;
           pos[c.a*3+1] -= wa * lam * ny;
@@ -202,10 +228,20 @@ export function ResultViewer3D() {
           pos[c.b*3+2] += wb * lam * nz;
         }
       }
+
+      // 5. Center-of-mass XZ correction (prevent lateral drift without edge-pinning)
+      let cx = 0, cz = 0;
+      for (let v = 0; v < N; v++) { cx += pos[v*3]; cz += pos[v*3+2]; }
+      cx /= N; cz /= N;
+      const dX = cx - cx0, dZ = cz - cz0;
+      for (let v = 0; v < N; v++) {
+        pos[v*3]   -= dX;  prev[v*3]   -= dX;
+        pos[v*3+2] -= dZ;  prev[v*3+2] -= dZ;
+      }
     }
   };
 
-  // ── Initialize cloth mesh when pattern changes ────────────────────────────
+  // ── Initialize when pattern changes ───────────────────────────────────────
   useEffect(() => {
     if (!scene.current || !tiledPattern) return;
 
@@ -217,27 +253,19 @@ export function ResultViewer3D() {
       clothRef.current = null;
     }
 
-    const { N, pos, prev, w, cons, indices, colors, clothWidth, clothHeight, centerX, centerY } =
-      buildCloth(tiledPattern);
+    const { N, pos, prev, w, cons, stCons, indices, colors,
+            clothW, clothH, centerX, centerZ } = buildCloth(tiledPattern);
 
     posRef.current  = pos;
     prevRef.current = prev;
     wRef.current    = w;
     consRef.current = cons;
-    nRef.current    = N;
-
-    // Build stitch constraints (restLen=0) from stitchingLines
-    const stCons: Con[] = [];
-    for (const group of tiledPattern.stitchingLines) {
-      for (let a = 0; a < group.length - 1; a++) {
-        for (let b = a + 1; b < group.length; b++) {
-          stCons.push({ a: group[a], b: group[b], r: 0, c: 1e-4 });
-        }
-      }
-    }
     stConRef.current = stCons;
+    nRef.current    = N;
+    cx0Ref.current  = centerX;
+    cz0Ref.current  = centerZ;
 
-    // Build geometry
+    // Build Three.js mesh
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos.slice(), 3));
     geo.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
@@ -247,18 +275,18 @@ export function ResultViewer3D() {
     const mat = new THREE.MeshPhongMaterial({
       vertexColors: true,
       side: THREE.DoubleSide,
-      shininess: 20,
+      shininess: 30,
     });
     const mesh = new THREE.Mesh(geo, mat);
     scene.current.add(mesh);
     clothRef.current = mesh;
 
-    // Position camera to look at hanging cloth from slightly in front
+    // Camera: slightly above and in front, looking down at the table cloth
     if (camera.current && controls.current) {
-      const camDist = Math.max(clothWidth, clothHeight) * 1.4;
-      camera.current.position.set(centerX, -centerY, camDist);
-      camera.current.lookAt(centerX, -centerY, 0);
-      controls.current.target.set(centerX, -centerY, 0);
+      const size = Math.max(clothW, clothH);
+      camera.current.position.set(centerX, size * 0.9, centerZ + size * 0.7);
+      camera.current.lookAt(centerX, 0, centerZ);
+      controls.current.target.set(centerX, 0, centerZ);
       controls.current.update();
     }
 
@@ -269,9 +297,7 @@ export function ResultViewer3D() {
     const animate = () => {
       rafRef.current = requestAnimationFrame(animate);
       if (!clothRef.current || !posRef.current) return;
-
       step();
-
       const attr = clothRef.current.geometry.getAttribute('position') as THREE.BufferAttribute;
       attr.array.set(posRef.current);
       attr.needsUpdate = true;
