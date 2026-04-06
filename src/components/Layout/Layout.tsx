@@ -9,9 +9,10 @@ interface LayoutProps {
   tangramPanel: ReactNode;
   resultPanel: ReactNode;
   inspectorPanel: ReactNode;
+  fabricTestTab?: ReactNode;
 }
 
-export function Layout({ shapePanel, tangramPanel, resultPanel, inspectorPanel }: LayoutProps) {
+export function Layout({ shapePanel, tangramPanel, resultPanel, inspectorPanel, fabricTestTab }: LayoutProps) {
   const { layoutMode, inspectorOpen, activeTab } = useAppStore();
 
   // Panel widths as percentages
@@ -78,36 +79,45 @@ export function Layout({ shapePanel, tangramPanel, resultPanel, inspectorPanel }
       <DesktopTabBar />
 
       <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Desktop: 3-column layout */}
-        <div className="hidden md:flex flex-1 overflow-hidden min-h-0">
-          {/* Shape Panel */}
-          <div
-            className="overflow-hidden flex flex-col min-h-0"
-            style={{ width: `${effectiveWidths.shape}%` }}
-          >
-            {shapePanel}
+        {/* Desktop: FabricTest fullscreen */}
+        {activeTab === 'FabricTest' && (
+          <div className="hidden md:flex flex-1 overflow-hidden min-h-0">
+            <div className="w-full h-full overflow-hidden">{fabricTestTab}</div>
           </div>
+        )}
 
-          <PanelResizer direction="horizontal" onResize={handleResize1} />
+        {/* Desktop: 3-column layout (when not FabricTest) */}
+        {activeTab !== 'FabricTest' && (
+          <div className="hidden md:flex flex-1 overflow-hidden min-h-0">
+            {/* Shape Panel */}
+            <div
+              className="overflow-hidden flex flex-col min-h-0"
+              style={{ width: `${effectiveWidths.shape}%` }}
+            >
+              {shapePanel}
+            </div>
 
-          {/* Tangram Panel */}
-          <div
-            className="overflow-hidden flex flex-col min-h-0"
-            style={{ width: `${effectiveWidths.tangram}%` }}
-          >
-            {tangramPanel}
+            <PanelResizer direction="horizontal" onResize={handleResize1} />
+
+            {/* Tangram Panel */}
+            <div
+              className="overflow-hidden flex flex-col min-h-0"
+              style={{ width: `${effectiveWidths.tangram}%` }}
+            >
+              {tangramPanel}
+            </div>
+
+            <PanelResizer direction="horizontal" onResize={handleResize2} />
+
+            {/* Result Panel */}
+            <div
+              className="overflow-hidden flex flex-col min-h-0"
+              style={{ width: `${effectiveWidths.result}%` }}
+            >
+              {resultPanel}
+            </div>
           </div>
-
-          <PanelResizer direction="horizontal" onResize={handleResize2} />
-
-          {/* Result Panel */}
-          <div
-            className="overflow-hidden flex flex-col min-h-0"
-            style={{ width: `${effectiveWidths.result}%` }}
-          >
-            {resultPanel}
-          </div>
-        </div>
+        )}
 
         {/* Mobile: Single panel based on activeTab */}
         <div className="md:hidden flex-1 overflow-hidden pb-16">
@@ -123,11 +133,14 @@ export function Layout({ shapePanel, tangramPanel, resultPanel, inspectorPanel }
           {activeTab === 'Inspector' && (
             <div className="h-full overflow-hidden">{inspectorPanel}</div>
           )}
+          {activeTab === 'FabricTest' && (
+            <div className="h-full overflow-hidden">{fabricTestTab}</div>
+          )}
         </div>
 
         {/* Desktop: Inspector Panel (bottom drawer) */}
         <div className="hidden md:block">
-          {inspectorOpen && (
+          {inspectorOpen && activeTab !== 'FabricTest' && (
             <>
               <PanelResizer direction="vertical" onResize={handleInspectorResize} />
               <div

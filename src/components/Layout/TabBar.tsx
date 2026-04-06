@@ -11,6 +11,7 @@ const TABS: TabConfig[] = [
   { id: 'Shape', icon: '🎯', label: 'Shape' },
   { id: 'Pattern', icon: '✏️', label: 'Pattern' },
   { id: 'Result', icon: '🎬', label: 'Result' },
+  { id: 'FabricTest', icon: '🧪', label: 'Test' },
   { id: 'Inspector', icon: '🔧', label: 'Inspector' },
 ];
 
@@ -46,7 +47,7 @@ export function DesktopTabBar() {
 
   return (
     <div className="hidden md:flex h-8 bg-[var(--bg-darkest)] border-b border-[var(--border)] px-2 items-center gap-1">
-      {TABS.slice(0, 3).map((tab) => (
+      {TABS.slice(0, 4).map((tab) => (
         <button
           key={tab.id}
           onClick={() => setActiveTab(tab.id)}

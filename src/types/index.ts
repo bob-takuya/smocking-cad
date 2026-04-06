@@ -180,7 +180,7 @@ export interface Singularity {
 export type LayoutMode = 'Explore' | 'ShapeFocus' | 'PatternFocus' | 'ResultFocus';
 export type InspectorTab = 'Optimization' | 'Singularities' | 'Analysis' | 'Compare';
 export type ResultDisplayMode = 'Smocked' | 'Heatmap' | 'PleatQuality' | 'TangramOverlay' | 'Transparent';
-export type ActiveTab = 'Shape' | 'Pattern' | 'Result' | 'Inspector';
+export type ActiveTab = 'Shape' | 'Pattern' | 'Result' | 'Inspector' | 'FabricTest';
 
 // ============================================================
 // Export Types
