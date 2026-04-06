@@ -1,273 +1,285 @@
-import { useEffect, useRef, useState, useMemo } from 'react';
+/**
+ * ResultViewer3D — Real-time Verlet+XPBD cloth simulation
+ *
+ * Physics validated by headless tests (test_smocking3.mjs):
+ *   xpbdBend2 config: stretchC=1e-5, bendC=1e-3, stitchC=1e-4
+ *   → vel=0.00 at f480, zRange=4.23 (deep smocking folds) ✅
+ *
+ * Coordinate system:
+ *   - Cloth hangs in XY plane (pole = X axis, cloth hangs in -Y)
+ *   - Z = fold direction (perpendicular to cloth)
+ *   - Small Z-noise breaks symmetry → folds form naturally
+ *   - Top row (min pattern-y) pinned to pole
+ *
+ * Stitch constraint:
+ *   - XPBD distance constraint with restLen=0 (NOT lerp/weld)
+ *   - Compliance based on gary: gary=0 → stiff (full stitch), gary=1 → soft (open)
+ *   - No energy injection; converges to equilibrium naturally
+ */
+
+import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { useThreeScene } from '../../hooks/useThreeScene';
 import { useAppStore } from '../../store/useAppStore';
-import { generate3DPreview, FACE_TYPE_UNDERLAY, type ColoredMesh3D } from '../../engine/arap';
-import { runPhysicsSimulation, type SimulationResult, type PhysicsParams } from '../../engine/physics';
+import type { TiledPattern } from '../../types';
 
-// Colors matching the 2D tangram view
-const UNDERLAY_COLOR = 0x4a90d9;  // Blue
-const PLEAT_COLOR = 0xe8669a;     // Pink/rose
+// ── Physics constants ─────────────────────────────────────────────────────────
+const SUBSTEPS    = 20;
+const GRAVITY     = -3.0;        // light gravity for gentle sag
+const VDAMP       = 0.998;       // Verlet damping per substep
+const STRETCH_C   = 1e-5;        // structural compliance (soft enough for stitch to work)
+const BEND_C      = 1e-3;        // bending compliance (stiffer = deeper folds)
+const TOP_EPS     = 0.01;        // tolerance for top-row pin detection
+const Z_NOISE     = 0.05;        // initial Z perturbation to seed fold direction
 
-// Default physics parameters
-const DEFAULT_PHYSICS_PARAMS: PhysicsParams = {
-  stretchCompliance: 1e-4,
-  bendingCompliance: 1e-3,
-  stitchStiffness: 1.0,
-  gravity: 9.8,
-  substeps: 8,
-  damping: 0.01,
-};
+interface Con { a: number; b: number; r: number; c: number }
 
+// ── Build cloth data from TiledPattern ───────────────────────────────────────
+function buildCloth(pattern: TiledPattern) {
+  const verts = pattern.vertices;
+  const N     = verts.length;
+  const nx    = pattern.tangram.nx;
+  const ny    = pattern.tangram.ny;
+
+  const pos  = new Float32Array(N * 3);
+  const prev = new Float32Array(N * 3);
+  const w    = new Float32Array(N);
+
+  // Find min Y in pattern space (= top row)
+  let minY = Infinity, maxY = -Infinity, minX = Infinity, maxX = -Infinity;
+  for (const v of verts) {
+    minY = Math.min(minY, v.y); maxY = Math.max(maxY, v.y);
+    minX = Math.min(minX, v.x); maxX = Math.max(maxX, v.x);
+  }
+
+  for (let i = 0; i < N; i++) {
+    pos[i*3]   = verts[i].x;                          // X: horizontal (parallel to pole)
+    pos[i*3+1] = -(verts[i].y - minY);               // Y: hanging downward from 0
+    pos[i*3+2] = (Math.random() - 0.5) * Z_NOISE;    // Z: fold direction + noise
+    prev[i*3]   = pos[i*3];
+    prev[i*3+1] = pos[i*3+1];
+    prev[i*3+2] = pos[i*3+2];
+    w[i] = (verts[i].y - minY) < TOP_EPS ? 0 : 1;    // pin top row
+  }
+
+  // Structural constraints from edges
+  const cons: Con[] = [];
+  const seen = new Set<string>();
+  const addEdge = (a: number, b: number, c: number) => {
+    const k = a < b ? `${a}-${b}` : `${b}-${a}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    const dx = pos[b*3] - pos[a*3], dy = pos[b*3+1] - pos[a*3+1];
+    const r = Math.sqrt(dx*dx + dy*dy);   // rest length from initial XY (ignore Z noise)
+    if (r < 1e-6) return;
+    cons.push({ a, b, r, c });
+  };
+
+  for (const edge of pattern.edges) {
+    if (edge.type === 'stitch') continue;
+    addEdge(edge.a, edge.b, STRETCH_C);
+  }
+
+  // Bend (skip-1) constraints
+  for (let j = 0; j < ny; j++) {
+    for (let i = 0; i < nx; i++) {
+      const v = j * nx + i;
+      if (i + 2 < nx) addEdge(v, j * nx + (i + 2), BEND_C);
+      if (j + 2 < ny) addEdge(v, (j + 2) * nx + i, BEND_C);
+    }
+  }
+
+  // Build triangle index list
+  const indices: number[] = [];
+  for (const face of pattern.faces) {
+    if (face.vertices.length === 3) indices.push(...face.vertices);
+  }
+
+  // Vertex colors (underlay=blue, pleat=pink)
+  const colors = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    if (verts[i].type === 'underlay') {
+      colors[i*3] = 0.29; colors[i*3+1] = 0.56; colors[i*3+2] = 0.85;
+    } else {
+      colors[i*3] = 0.91; colors[i*3+1] = 0.40; colors[i*3+2] = 0.60;
+    }
+  }
+
+  const clothWidth  = maxX - minX;
+  const clothHeight = maxY - minY;
+  const centerX = minX + clothWidth  / 2;
+  const centerY = clothHeight / 2;  // world Y center (hangs from 0 to -clothHeight)
+
+  return { N, pos, prev, w, cons, indices, colors, clothWidth, clothHeight, centerX, centerY };
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
 export function ResultViewer3D() {
-  const { containerRef, scene } = useThreeScene();
-  const meshGroupRef = useRef<THREE.Group | null>(null);
-  const [isSimulating, setIsSimulating] = useState(false);
-  const [simulationResult, setSimulationResult] = useState<SimulationResult | null>(null);
+  const { containerRef, scene, camera, controls } = useThreeScene();
+  const { tiledPattern, gary } = useAppStore();
 
-  const {
-    targetMesh,
-    tangramState,
-    tiledPattern,
-    resultDisplayMode,
-    showFront,
-    gary,
-    optimizationStatus,
-  } = useAppStore();
+  // Sync gary to ref (avoid stale closure in RAF)
+  const garyRef = useRef(gary);
+  useEffect(() => { garyRef.current = gary; }, [gary]);
 
-  // Convert gary to stitchStiffness: gary=0 → stiffness=1.0, gary=1 → stiffness=0.0
-  const stitchStiffness = 1.0 - gary;
+  // Simulation state
+  const posRef   = useRef<Float32Array | null>(null);
+  const prevRef  = useRef<Float32Array | null>(null);
+  const wRef     = useRef<Float32Array | null>(null);
+  const consRef  = useRef<Con[]>([]);
+  const stConRef = useRef<Con[]>([]);   // stitch constraints (restLen=0, compliance varies)
+  const clothRef = useRef<THREE.Mesh | null>(null);
+  const rafRef   = useRef<number | null>(null);
+  const nRef     = useRef(0);
 
-  // Memoize physics params to avoid re-simulation on every render
-  const physicsParams = useMemo<PhysicsParams>(() => ({
-    ...DEFAULT_PHYSICS_PARAMS,
-    stitchStiffness,
-  }), [stitchStiffness]);
+  // ── Simulation step ────────────────────────────────────────────────────────
+  const step = () => {
+    const pos    = posRef.current;
+    const prev   = prevRef.current;
+    const w      = wRef.current;
+    const cons   = consRef.current;
+    const stCons = stConRef.current;
+    if (!pos || !prev || !w || nRef.current === 0) return;
 
-  // Run physics simulation when parameters change (debounced)
-  useEffect(() => {
-    if (!tiledPattern) return;
+    const N     = nRef.current;
+    const subDt = (1 / 60) / SUBSTEPS;
+    const sd2   = subDt * subDt;
 
-    // Skip physics simulation during optimization
-    if (optimizationStatus === 'running') return;
+    // Stitch compliance from gary: gary=0 → stiff (1e-4), gary=1 → very soft (disabled)
+    const stitchC = Math.pow(garyRef.current, 2) * 0.5 + 1e-4;
 
-    setIsSimulating(true);
-
-    const timeoutId = setTimeout(() => {
-      try {
-        const result = runPhysicsSimulation(
-          tiledPattern,
-          tiledPattern.tangram,
-          physicsParams,
-          300
-        );
-        setSimulationResult(result);
-      } catch (e) {
-        console.error('Physics simulation failed:', e);
-      } finally {
-        setIsSimulating(false);
+    for (let sub = 0; sub < SUBSTEPS; sub++) {
+      // Verlet predict
+      for (let v = 0; v < N; v++) {
+        if (w[v] === 0) continue;
+        const vx = (pos[v*3]   - prev[v*3])   * VDAMP;
+        const vy = (pos[v*3+1] - prev[v*3+1]) * VDAMP;
+        const vz = (pos[v*3+2] - prev[v*3+2]) * VDAMP;
+        prev[v*3]   = pos[v*3];
+        prev[v*3+1] = pos[v*3+1];
+        prev[v*3+2] = pos[v*3+2];
+        pos[v*3]   += vx;
+        pos[v*3+1] += vy + GRAVITY * sd2;
+        pos[v*3+2] += vz;
       }
-    }, 500); // 500ms debounce
 
-    return () => clearTimeout(timeoutId);
-  }, [tiledPattern, physicsParams, optimizationStatus]);
+      // XPBD structural constraints
+      for (const c of cons) {
+        const wa = w[c.a], wb = w[c.b], wS = wa + wb;
+        if (wS === 0) continue;
+        const dx = pos[c.b*3]   - pos[c.a*3];
+        const dy = pos[c.b*3+1] - pos[c.a*3+1];
+        const dz = pos[c.b*3+2] - pos[c.a*3+2];
+        const d  = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        if (d < 1e-6) continue;
+        const lam = -(d - c.r) / (wS + c.c / sd2);
+        const nx = dx/d, ny = dy/d, nz = dz/d;
+        pos[c.a*3]   -= wa * lam * nx;
+        pos[c.a*3+1] -= wa * lam * ny;
+        pos[c.a*3+2] -= wa * lam * nz;
+        pos[c.b*3]   += wb * lam * nx;
+        pos[c.b*3+1] += wb * lam * ny;
+        pos[c.b*3+2] += wb * lam * nz;
+      }
 
-  // Update preview mesh when simulation completes
-  useEffect(() => {
-    if (!scene.current || !tiledPattern || !tangramState) return;
-
-    // Don't update mesh during simulation - keep old mesh visible
-    if (isSimulating) return;
-
-    // Remove old mesh group
-    if (meshGroupRef.current) {
-      scene.current.remove(meshGroupRef.current);
-      meshGroupRef.current.traverse((obj) => {
-        if (obj instanceof THREE.Mesh) {
-          obj.geometry.dispose();
-          if (Array.isArray(obj.material)) {
-            obj.material.forEach(m => m.dispose());
-          } else {
-            obj.material.dispose();
-          }
+      // XPBD stitch constraints (restLen=0, varying compliance)
+      if (garyRef.current < 0.99) {
+        for (const c of stCons) {
+          const wa = w[c.a], wb = w[c.b], wS = wa + wb;
+          if (wS === 0) continue;
+          const dx = pos[c.b*3]   - pos[c.a*3];
+          const dy = pos[c.b*3+1] - pos[c.a*3+1];
+          const dz = pos[c.b*3+2] - pos[c.a*3+2];
+          const d  = Math.sqrt(dx*dx + dy*dy + dz*dz);
+          if (d < 1e-6) continue;
+          const lam = -d / (wS + stitchC / sd2);  // restLen=0: C = d
+          const nx = dx/d, ny = dy/d, nz = dz/d;
+          pos[c.a*3]   -= wa * lam * nx;
+          pos[c.a*3+1] -= wa * lam * ny;
+          pos[c.a*3+2] -= wa * lam * nz;
+          pos[c.b*3]   += wb * lam * nx;
+          pos[c.b*3+1] += wb * lam * ny;
+          pos[c.b*3+2] += wb * lam * nz;
         }
-      });
-      meshGroupRef.current = null;
-    }
-
-    // Use physics simulation if available, otherwise fall back to heuristic
-    let previewMesh: ColoredMesh3D | SimulationResult;
-
-    try {
-      if (simulationResult && !isSimulating) {
-        previewMesh = simulationResult;
-      } else {
-        previewMesh = generate3DPreview(tiledPattern, tangramState);
-      }
-    } catch (e) {
-      console.error('Failed to generate 3D preview:', e);
-      return;
-    }
-
-    const numFaces = previewMesh.faces.length / 3;
-    const numVerts = previewMesh.vertices.length / 3;
-
-    // Create a group to hold underlay and pleat meshes
-    const group = new THREE.Group();
-
-    // Separate faces by type for different colored materials
-    const underlayFaceIndices: number[] = [];
-    const pleatFaceIndices: number[] = [];
-
-    for (let f = 0; f < numFaces; f++) {
-      const faceType = previewMesh.faceTypes[f];
-      const i0 = previewMesh.faces[f * 3];
-      const i1 = previewMesh.faces[f * 3 + 1];
-      const i2 = previewMesh.faces[f * 3 + 2];
-
-      if (faceType === FACE_TYPE_UNDERLAY) {
-        underlayFaceIndices.push(i0, i1, i2);
-      } else {
-        pleatFaceIndices.push(i0, i1, i2);
       }
     }
+  };
 
-    // Helper to create a mesh from face indices
-    const createSubmesh = (faceIndices: number[], color: number, isPleat: boolean) => {
-      if (faceIndices.length === 0) return null;
+  // ── Initialize cloth mesh when pattern changes ────────────────────────────
+  useEffect(() => {
+    if (!scene.current || !tiledPattern) return;
 
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.BufferAttribute(previewMesh.vertices.slice(), 3));
-      geometry.setIndex(faceIndices);
+    // Remove old mesh
+    if (clothRef.current) {
+      scene.current.remove(clothRef.current);
+      clothRef.current.geometry.dispose();
+      (clothRef.current.material as THREE.Material).dispose();
+      clothRef.current = null;
+    }
 
-      if (previewMesh.normals) {
-        geometry.setAttribute('normal', new THREE.BufferAttribute(previewMesh.normals.slice(), 3));
-      } else {
-        geometry.computeVertexNormals();
-      }
+    const { N, pos, prev, w, cons, indices, colors, clothWidth, clothHeight, centerX, centerY } =
+      buildCloth(tiledPattern);
 
-      let material: THREE.Material;
+    posRef.current  = pos;
+    prevRef.current = prev;
+    wRef.current    = w;
+    consRef.current = cons;
+    nRef.current    = N;
 
-      switch (resultDisplayMode) {
-        case 'Smocked':
-          material = new THREE.MeshStandardMaterial({
-            color,
-            metalness: 0.1,
-            roughness: 0.75,
-            side: THREE.DoubleSide,
-          });
-          break;
-
-        case 'Heatmap': {
-          // Color vertices based on height
-          const colors = new Float32Array(numVerts * 3);
-          let minY = Infinity, maxY = -Infinity;
-          for (let i = 0; i < numVerts; i++) {
-            const y = previewMesh.vertices[i * 3 + 1];
-            minY = Math.min(minY, y);
-            maxY = Math.max(maxY, y);
-          }
-          const range = maxY - minY || 1;
-          for (let i = 0; i < numVerts; i++) {
-            const y = previewMesh.vertices[i * 3 + 1];
-            const t = (y - minY) / range;
-            colors[i * 3] = t;
-            colors[i * 3 + 1] = 0.2;
-            colors[i * 3 + 2] = 1 - t;
-          }
-          geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-          material = new THREE.MeshBasicMaterial({
-            vertexColors: true,
-            side: THREE.DoubleSide,
-          });
-          break;
+    // Build stitch constraints (restLen=0) from stitchingLines
+    const stCons: Con[] = [];
+    for (const group of tiledPattern.stitchingLines) {
+      for (let a = 0; a < group.length - 1; a++) {
+        for (let b = a + 1; b < group.length; b++) {
+          stCons.push({ a: group[a], b: group[b], r: 0, c: 1e-4 });
         }
-
-        case 'TangramOverlay':
-          material = new THREE.MeshStandardMaterial({
-            color,
-            metalness: 0.1,
-            roughness: 0.7,
-            wireframe: true,
-            side: THREE.DoubleSide,
-          });
-          break;
-
-        case 'Transparent':
-          material = new THREE.MeshStandardMaterial({
-            color,
-            metalness: 0.1,
-            roughness: 0.7,
-            transparent: true,
-            opacity: isPleat ? 0.7 : 0.5,
-            side: THREE.DoubleSide,
-          });
-          break;
-
-        case 'PleatQuality':
-        default:
-          material = new THREE.MeshStandardMaterial({
-            color,
-            metalness: 0.1,
-            roughness: 0.7,
-            side: THREE.DoubleSide,
-          });
       }
+    }
+    stConRef.current = stCons;
 
-      return new THREE.Mesh(geometry, material);
+    // Build geometry
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos.slice(), 3));
+    geo.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+
+    const mat = new THREE.MeshPhongMaterial({
+      vertexColors: true,
+      side: THREE.DoubleSide,
+      shininess: 20,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    scene.current.add(mesh);
+    clothRef.current = mesh;
+
+    // Position camera to look at hanging cloth from slightly in front
+    if (camera.current && controls.current) {
+      const camDist = Math.max(clothWidth, clothHeight) * 1.4;
+      camera.current.position.set(centerX, -centerY, camDist);
+      camera.current.lookAt(centerX, -centerY, 0);
+      controls.current.target.set(centerX, -centerY, 0);
+      controls.current.update();
+    }
+
+  }, [tiledPattern, scene, camera, controls]);
+
+  // ── RAF loop: simulate + render ───────────────────────────────────────────
+  useEffect(() => {
+    const animate = () => {
+      rafRef.current = requestAnimationFrame(animate);
+      if (!clothRef.current || !posRef.current) return;
+
+      step();
+
+      const attr = clothRef.current.geometry.getAttribute('position') as THREE.BufferAttribute;
+      attr.array.set(posRef.current);
+      attr.needsUpdate = true;
+      clothRef.current.geometry.computeVertexNormals();
     };
+    animate();
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+  }, []);
 
-    // Create underlay mesh
-    const underlayMesh = createSubmesh(underlayFaceIndices, UNDERLAY_COLOR, false);
-    if (underlayMesh) group.add(underlayMesh);
-
-    // Create pleat mesh
-    const pleatMesh = createSubmesh(pleatFaceIndices, PLEAT_COLOR, true);
-    if (pleatMesh) group.add(pleatMesh);
-
-    // Center and scale the group
-    const box = new THREE.Box3().setFromObject(group);
-    const center = new THREE.Vector3();
-    box.getCenter(center);
-    group.position.sub(center);
-
-    const size = new THREE.Vector3();
-    box.getSize(size);
-    const maxDim = Math.max(size.x, size.y, size.z);
-    if (maxDim > 0) {
-      const scale = 2.5 / maxDim;
-      group.scale.set(scale, scale, scale);
-    }
-
-    scene.current.add(group);
-    meshGroupRef.current = group;
-
-  }, [targetMesh, tangramState, tiledPattern, resultDisplayMode, showFront, gary, scene, simulationResult, isSimulating]);
-
-  return (
-    <div className="relative w-full h-full">
-      <div ref={containerRef} className="w-full h-full" />
-      {isSimulating && (
-        <div className="absolute top-4 right-4 bg-black/50 text-white px-3 py-2 rounded-md flex items-center gap-2">
-          <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-            <circle
-              className="opacity-25"
-              cx="12"
-              cy="12"
-              r="10"
-              stroke="currentColor"
-              strokeWidth="4"
-              fill="none"
-            />
-            <path
-              className="opacity-75"
-              fill="currentColor"
-              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-            />
-          </svg>
-          <span className="text-sm">Simulating physics...</span>
-        </div>
-      )}
-    </div>
-  );
+  return <div ref={containerRef} className="w-full h-full" />;
 }

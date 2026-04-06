@@ -7,12 +7,11 @@ interface TabConfig {
   label: string;
 }
 
+// Shape + Inspector tabs hidden — simulation-focus mode
 const TABS: TabConfig[] = [
-  { id: 'Shape', icon: '🎯', label: 'Shape' },
   { id: 'Pattern', icon: '✏️', label: 'Pattern' },
-  { id: 'Result', icon: '🎬', label: 'Result' },
+  { id: 'Result', icon: '🎬', label: 'Simulate' },
   { id: 'FabricTest', icon: '🧪', label: 'Test' },
-  { id: 'Inspector', icon: '🔧', label: 'Inspector' },
 ];
 
 export function MobileTabBar() {
