@@ -1,0 +1,1 @@
+export { FabricTestTab } from './FabricTestTab';
