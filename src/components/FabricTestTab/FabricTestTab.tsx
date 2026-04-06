@@ -178,23 +178,41 @@ export function FabricTestTab() {
         pos[c.b*3+2] += wb * lambda * nz;
       }
 
-      // 3. Stitch constraint (soft spring: lerp toward midpoint each substep)
+      // 3. Stitch constraint
       if (pA !== null && pB !== null) {
         const strength = strRef.current;
         if (strength > 0 && w[pA] !== 0 && w[pB] !== 0) {
-          // Rate per substep: max 3% closure at strength=1
-          // This is stable because it never overshoots (lerp, not force)
-          const rate = strength * 0.03;
+          const dx = pos[pB*3]   - pos[pA*3];
+          const dy = pos[pB*3+1] - pos[pA*3+1];
+          const dz = pos[pB*3+2] - pos[pA*3+2];
+          const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
           const mx = (pos[pA*3]   + pos[pB*3])   / 2;
           const my = (pos[pA*3+1] + pos[pB*3+1]) / 2;
           const mz = (pos[pA*3+2] + pos[pB*3+2]) / 2;
 
-          pos[pA*3]   += (mx - pos[pA*3])   * rate;
-          pos[pA*3+1] += (my - pos[pA*3+1]) * rate;
-          pos[pA*3+2] += (mz - pos[pA*3+2]) * rate;
-          pos[pB*3]   += (mx - pos[pB*3])   * rate;
-          pos[pB*3+1] += (my - pos[pB*3+1]) * rate;
-          pos[pB*3+2] += (mz - pos[pB*3+2]) * rate;
+          const SNAP = 0.08; // weld threshold (world units)
+          if (dist < SNAP) {
+            // Welded: force exact same position, zero relative velocity
+            pos[pA*3]   = pos[pB*3]   = mx;
+            pos[pA*3+1] = pos[pB*3+1] = my;
+            pos[pA*3+2] = pos[pB*3+2] = mz;
+            // Kill relative velocity so they don't spring apart
+            const rvx = (vel[pA*3]   - vel[pB*3])   * 0.5;
+            const rvy = (vel[pA*3+1] - vel[pB*3+1]) * 0.5;
+            const rvz = (vel[pA*3+2] - vel[pB*3+2]) * 0.5;
+            vel[pA*3]   -= rvx; vel[pB*3]   += rvx;
+            vel[pA*3+1] -= rvy; vel[pB*3+1] += rvy;
+            vel[pA*3+2] -= rvz; vel[pB*3+2] += rvz;
+          } else {
+            // Lerp: 3% per substep at strength=1
+            const rate = strength * 0.03;
+            pos[pA*3]   += (mx - pos[pA*3])   * rate;
+            pos[pA*3+1] += (my - pos[pA*3+1]) * rate;
+            pos[pA*3+2] += (mz - pos[pA*3+2]) * rate;
+            pos[pB*3]   += (mx - pos[pB*3])   * rate;
+            pos[pB*3+1] += (my - pos[pB*3+1]) * rate;
+            pos[pB*3+2] += (mz - pos[pB*3+2]) * rate;
+          }
         }
       }
 
