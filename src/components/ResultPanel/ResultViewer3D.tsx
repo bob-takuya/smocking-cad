@@ -25,7 +25,7 @@ const FLOOR_FRICTION = 0.85;   // XZ velocity multiplier when touching floor (0=
 const STRETCH_C   = 1e-5;
 const BEND_C      = 1e-3;
 const STITCH_C    = 1e-6;      // stiff stitch (closes to 0 distance)
-const RAMP_FRAMES = 180;       // 3 s warm-up at 60 fps
+const RAMP_FRAMES = 360;       // 6 s warm-up at 60 fps (gentle ramp)
 const PREDEFORM_H = 0.4;       // initial Y lift for excess fabric between stitches
 
 interface ClothData {
@@ -218,8 +218,10 @@ export function ResultViewer3D() {
     const ramp    = Math.min(frame / RAMP_FRAMES, 1.0);
     const g       = garyRef.current;
     const doStitch = g < 0.99;
-    // Compliance: starts very soft (1.0), ramps to STITCH_C * (1 + g²)
-    const stitchC = STITCH_C * (1 + g * g * 500) + (1.0 - ramp) * 1.0;
+    // Stitch: starts near-zero force (compliance=2.0), eases to target over RAMP_FRAMES
+    const stitchC = STITCH_C * (1 + g * g * 500) + (1.0 - ramp) * 2.0;
+    // Gravity also ramps up: starts at 10% of full gravity, reaches 100% at ramp=1
+    const gravScale = 0.1 + ramp * 0.9;
 
     const cons   = consBufRef.current;
     const nCons  = nConsRef.current;
@@ -237,7 +239,7 @@ export function ResultViewer3D() {
         const vy = (pos[v3+1] - prev[v3+1]) * VDAMP;
         const vz = (pos[v3+2] - prev[v3+2]) * VDAMP;
         prev[v3]   = pos[v3];   pos[v3]   += vx;
-        prev[v3+1] = pos[v3+1]; pos[v3+1] += vy + GRAVITY * sd2;
+        prev[v3+1] = pos[v3+1]; pos[v3+1] += vy + GRAVITY * gravScale * sd2;
         prev[v3+2] = pos[v3+2]; pos[v3+2] += vz;
       }
 
