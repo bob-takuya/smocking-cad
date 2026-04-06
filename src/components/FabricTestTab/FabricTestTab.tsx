@@ -8,10 +8,9 @@ import { Slider } from '../ui/Slider';
 const RES = 20;                         // grid resolution
 const N = (RES + 1) * (RES + 1);        // vertex count = 441
 const SPACING = 1.0;
-const SUBSTEPS = 15;
-const DAMPING = 0.98;                   // damping applied to velocity per frame
-const STRETCH_COMPLIANCE = 1e-7;        // small but not zero for stability
-const BEND_COMPLIANCE = 1e-3;           // gentle bending resistance
+const SUBSTEPS = 20;
+const STRETCH_COMPLIANCE = 1e-8;        // stiff cloth
+const BEND_COMPLIANCE = 1e-4;           // resist folding
 const FLOOR_Y = 0.0;                    // table surface
 
 // Distance constraint type
@@ -40,9 +39,10 @@ export function FabricTestTab() {
   const clothMeshRef = useRef<THREE.Mesh | null>(null);
   const raycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster());
 
-  // Position Verlet simulation arrays
+  // Simulation arrays
   const posRef = useRef<Float32Array>(new Float32Array(N * 3));
   const prevRef = useRef<Float32Array>(new Float32Array(N * 3));
+  const velRef = useRef<Float32Array>(new Float32Array(N * 3));
   const constraintsRef = useRef<DistConstraint[]>([]);
 
   // Selection state
@@ -73,6 +73,7 @@ export function FabricTestTab() {
   const initializeCloth = useCallback(() => {
     const pos = posRef.current;
     const prev = prevRef.current;
+    const vel = velRef.current;
 
     // Center the cloth
     const offset = (RES * SPACING) / 2;
@@ -87,6 +88,10 @@ export function FabricTestTab() {
         prev[v * 3]     = pos[v * 3];
         prev[v * 3 + 1] = pos[v * 3 + 1];
         prev[v * 3 + 2] = pos[v * 3 + 2];
+
+        vel[v * 3]     = 0;
+        vel[v * 3 + 1] = 0;
+        vel[v * 3 + 2] = 0;
       }
     }
   }, []);
@@ -158,6 +163,7 @@ export function FabricTestTab() {
   const simulate = useCallback(() => {
     const pos = posRef.current;
     const prev = prevRef.current;
+    const vel = velRef.current;
     const constraints = constraintsRef.current;
     const pA = pointARef.current;
     const pB = pointBRef.current;
@@ -168,103 +174,82 @@ export function FabricTestTab() {
     const subDt2 = subDt * subDt;
 
     for (let sub = 0; sub < SUBSTEPS; sub++) {
-      // 1. Verlet prediction: pos_new = pos + (pos - prev) * DAMPING
-      //    No gravity - cloth rests on table
+      // 1. Predict positions using explicit velocity (no gravity - cloth on table)
       for (let v = 0; v < N; v++) {
-        const vx = (pos[v * 3] - prev[v * 3]) * DAMPING;
-        const vy = (pos[v * 3 + 1] - prev[v * 3 + 1]) * DAMPING;
-        const vz = (pos[v * 3 + 2] - prev[v * 3 + 2]) * DAMPING;
-
-        // Store current pos as prev
-        prev[v * 3] = pos[v * 3];
+        prev[v * 3]     = pos[v * 3];
         prev[v * 3 + 1] = pos[v * 3 + 1];
         prev[v * 3 + 2] = pos[v * 3 + 2];
-
-        // Predict new position
-        pos[v * 3] += vx;
-        pos[v * 3 + 1] += vy;
-        pos[v * 3 + 2] += vz;
+        pos[v * 3]     += vel[v * 3]     * subDt;
+        pos[v * 3 + 1] += vel[v * 3 + 1] * subDt;
+        pos[v * 3 + 2] += vel[v * 3 + 2] * subDt;
       }
 
       // 2. Solve distance constraints (stretch + bend)
       for (const c of constraints) {
-        const dx = pos[c.b * 3] - pos[c.a * 3];
+        const dx = pos[c.b * 3]     - pos[c.a * 3];
         const dy = pos[c.b * 3 + 1] - pos[c.a * 3 + 1];
         const dz = pos[c.b * 3 + 2] - pos[c.a * 3 + 2];
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (dist === 0) continue;
+        if (dist < 0.0001) continue;
 
-        // XPBD: alpha = compliance / (dt^2 * w), where w = w_a + w_b = 1
         const alpha = c.compliance / subDt2;
         const C = dist - c.restLen;
         const lambda = -C / (1.0 + alpha);
-
-        // Normalize direction
-        const nx = dx / dist;
-        const ny = dy / dist;
-        const nz = dz / dist;
-
-        // Apply correction (w_a = w_b = 0.5)
         const correction = lambda * 0.5;
-        pos[c.a * 3] -= correction * nx;
+        const nx = dx / dist, ny = dy / dist, nz = dz / dist;
+
+        pos[c.a * 3]     -= correction * nx;
         pos[c.a * 3 + 1] -= correction * ny;
         pos[c.a * 3 + 2] -= correction * nz;
-        pos[c.b * 3] += correction * nx;
+        pos[c.b * 3]     += correction * nx;
         pos[c.b * 3 + 1] += correction * ny;
         pos[c.b * 3 + 2] += correction * nz;
       }
 
-      // 3. Solve stitch constraint (pull points toward each other)
+      // 3. Stitch constraint: proper XPBD distance between pA and pB (restLen=0)
       if (pA !== null && pB !== null && strength > 0) {
-        // Calculate midpoint (keep above floor)
-        const midX = (pos[pA * 3] + pos[pB * 3]) / 2;
-        const midY = Math.max(FLOOR_Y, (pos[pA * 3 + 1] + pos[pB * 3 + 1]) / 2);
-        const midZ = (pos[pA * 3 + 2] + pos[pB * 3 + 2]) / 2;
-
-        // Stitch compliance: lower = stiffer. strength 1 = very stiff, strength 0 = no pull
-        const stitchCompliance = (1.0 - strength) * 0.01 + 1e-8;
-        const stitchAlpha = stitchCompliance / subDt2;
-
-        // Pull point A toward mid
-        {
-          const dx = midX - pos[pA * 3];
-          const dy = midY - pos[pA * 3 + 1];
-          const dz = midZ - pos[pA * 3 + 2];
-          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-          if (dist > 0.001) {
-            const C = dist;  // want distance to be 0
-            const lambda = -C / (1.0 + stitchAlpha);
-            const corr = -lambda;  // negative because we want to move toward mid
-            pos[pA * 3] += corr * (dx / dist);
-            pos[pA * 3 + 1] += corr * (dy / dist);
-            pos[pA * 3 + 2] += corr * (dz / dist);
-          }
-        }
-
-        // Pull point B toward mid
-        {
-          const dx = midX - pos[pB * 3];
-          const dy = midY - pos[pB * 3 + 1];
-          const dz = midZ - pos[pB * 3 + 2];
-          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-          if (dist > 0.001) {
-            const C = dist;
-            const lambda = -C / (1.0 + stitchAlpha);
-            const corr = -lambda;
-            pos[pB * 3] += corr * (dx / dist);
-            pos[pB * 3 + 1] += corr * (dy / dist);
-            pos[pB * 3 + 2] += corr * (dz / dist);
-          }
+        const dx = pos[pB * 3]     - pos[pA * 3];
+        const dy = pos[pB * 3 + 1] - pos[pA * 3 + 1];
+        const dz = pos[pB * 3 + 2] - pos[pA * 3 + 2];
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist > 0.001) {
+          // compliance decreases cubically with strength → smooth pull
+          const stitchCompliance = Math.pow(1.0 - strength, 3) * 10.0 + 1e-6;
+          const alpha = stitchCompliance / subDt2;
+          // C = dist (want restLen=0), lambda is negative (pulling together)
+          const lambda = -dist / (1.0 + alpha);
+          const nx = dx / dist, ny = dy / dist, nz = dz / dist;
+          // w_a = w_b = 0.5: move each half way
+          pos[pA * 3]     -= 0.5 * lambda * nx;
+          pos[pA * 3 + 1] -= 0.5 * lambda * ny;
+          pos[pA * 3 + 2] -= 0.5 * lambda * nz;
+          pos[pB * 3]     += 0.5 * lambda * nx;
+          pos[pB * 3 + 1] += 0.5 * lambda * ny;
+          pos[pB * 3 + 2] += 0.5 * lambda * nz;
         }
       }
 
-      // 4. Floor constraint: y >= FLOOR_Y (table surface)
+      // 4. Floor constraint: y >= FLOOR_Y
       for (let v = 0; v < N; v++) {
         if (pos[v * 3 + 1] < FLOOR_Y) {
           pos[v * 3 + 1] = FLOOR_Y;
-          prev[v * 3 + 1] = FLOOR_Y;  // kill vertical velocity at floor
+          vel[v * 3 + 1] = 0;
         }
       }
+
+      // 5. Derive velocities from position delta
+      for (let v = 0; v < N; v++) {
+        vel[v * 3]     = (pos[v * 3]     - prev[v * 3])     / subDt;
+        vel[v * 3 + 1] = (pos[v * 3 + 1] - prev[v * 3 + 1]) / subDt;
+        vel[v * 3 + 2] = (pos[v * 3 + 2] - prev[v * 3 + 2]) / subDt;
+      }
+    }
+
+    // 6. Apply velocity damping ONCE per frame (after all substeps)
+    for (let v = 0; v < N; v++) {
+      vel[v * 3]     *= 0.985;
+      vel[v * 3 + 1] *= 0.985;
+      vel[v * 3 + 2] *= 0.985;
     }
   }, []);
 
