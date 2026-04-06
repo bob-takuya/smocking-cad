@@ -8,12 +8,18 @@ import { Slider } from '../ui/Slider';
 const RES     = 30;                        // 30×30 cells → 31×31 = 961 vertices
 const N       = (RES + 1) * (RES + 1);
 const SPACING = 0.5;                       // 15×15 unit cloth
-const SUBSTEPS = 15;
-const GRAVITY  = -6.0;                     // downward acceleration (world-Y)
+const SUBSTEPS = 20;
+const GRAVITY  = -5.0;                     // downward acceleration (world-Y)
 
-// Compliance values
-const STRETCH_C = 1e-8;                    // almost inextensible
-const BEND_C    = 5e-5;                    // resist folding flat
+// Compliance values — tested locally: stretchC=1e-5 + Verlet is stable & welds
+const STRETCH_C = 1e-5;                    // soft enough to allow folding without fighting stitch
+const BEND_C    = 1e-3;                    // gentle fold resistance
+
+// Verlet damping (applied per substep as velocity multiplier)
+const VERLET_DAMP = 0.998;
+
+// Weld threshold: snap points together when distance < this
+const SNAP_DIST = 0.5;
 
 // Cloth is hung from the top row (j=0).
 // Vertices hang downward in -Y.
@@ -126,50 +132,47 @@ export function FabricTestTab() {
     conRef.current = cons;
   }, []);
 
-  // ── Simulate one frame ─────────────────────────────────────────────────────
+  // ── Simulate one frame (Position Verlet + XPBD) ───────────────────────────
+  // Tested locally: Verlet + stretchC=1e-5 + snapDist=0.5 → stable weld
   const simulateFrame = useCallback(() => {
     const pos  = posRef.current;
     const prev = prevRef.current;
-    const vel  = velRef.current;
     const w    = wRef.current;
     const cons = conRef.current;
     const pA   = pARef.current;
     const pB   = pBRef.current;
 
-    const dt    = 1 / 60;
-    const subDt = dt / SUBSTEPS;
+    const subDt = (1 / 60) / SUBSTEPS;
     const sd2   = subDt * subDt;
 
     for (let sub = 0; sub < SUBSTEPS; sub++) {
-      // 1. Integrate velocity → predict positions
+      // 1. Verlet predict: x_new = x + (x - x_prev) * damp + gravity * dt²
       for (let v = 0; v < N; v++) {
         if (w[v] === 0) continue;
-        vel[v*3 + 1] += GRAVITY * subDt;          // gravity
-        prev[v*3]     = pos[v*3];
-        prev[v*3 + 1] = pos[v*3 + 1];
-        prev[v*3 + 2] = pos[v*3 + 2];
-        pos[v*3]     += vel[v*3]     * subDt;
-        pos[v*3 + 1] += vel[v*3 + 1] * subDt;
-        pos[v*3 + 2] += vel[v*3 + 2] * subDt;
+        const vx = (pos[v*3]   - prev[v*3])   * VERLET_DAMP;
+        const vy = (pos[v*3+1] - prev[v*3+1]) * VERLET_DAMP;
+        const vz = (pos[v*3+2] - prev[v*3+2]) * VERLET_DAMP;
+        prev[v*3]   = pos[v*3];
+        prev[v*3+1] = pos[v*3+1];
+        prev[v*3+2] = pos[v*3+2];
+        pos[v*3]   += vx;
+        pos[v*3+1] += vy + GRAVITY * sd2;   // gravity as position delta
+        pos[v*3+2] += vz;
       }
 
-      // 2. Solve structural + bend constraints (XPBD)
+      // 2. Solve XPBD distance constraints
       for (const c of cons) {
         const wa = w[c.a], wb = w[c.b];
         const wSum = wa + wb;
         if (wSum === 0) continue;
-
         const dx = pos[c.b*3]   - pos[c.a*3];
         const dy = pos[c.b*3+1] - pos[c.a*3+1];
         const dz = pos[c.b*3+2] - pos[c.a*3+2];
         const d  = Math.sqrt(dx*dx + dy*dy + dz*dz);
         if (d < 1e-6) continue;
-
         const alpha  = c.compliance / sd2;
-        const C      = d - c.restLen;
-        const lambda = -C / (wSum + alpha);
+        const lambda = -(d - c.restLen) / (wSum + alpha);
         const nx = dx/d, ny = dy/d, nz = dz/d;
-
         pos[c.a*3]   -= wa * lambda * nx;
         pos[c.a*3+1] -= wa * lambda * ny;
         pos[c.a*3+2] -= wa * lambda * nz;
@@ -179,33 +182,29 @@ export function FabricTestTab() {
       }
 
       // 3. Stitch constraint
-      if (pA !== null && pB !== null) {
+      if (pA !== null && pB !== null && w[pA] !== 0 && w[pB] !== 0) {
         const strength = strRef.current;
-        if (strength > 0 && w[pA] !== 0 && w[pB] !== 0) {
-          const dx = pos[pB*3]   - pos[pA*3];
-          const dy = pos[pB*3+1] - pos[pA*3+1];
-          const dz = pos[pB*3+2] - pos[pA*3+2];
+        if (strength > 0) {
+          const dx   = pos[pB*3]   - pos[pA*3];
+          const dy   = pos[pB*3+1] - pos[pA*3+1];
+          const dz   = pos[pB*3+2] - pos[pA*3+2];
           const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-          const mx = (pos[pA*3]   + pos[pB*3])   / 2;
-          const my = (pos[pA*3+1] + pos[pB*3+1]) / 2;
-          const mz = (pos[pA*3+2] + pos[pB*3+2]) / 2;
+          const mx   = (pos[pA*3]   + pos[pB*3])   / 2;
+          const my   = (pos[pA*3+1] + pos[pB*3+1]) / 2;
+          const mz   = (pos[pA*3+2] + pos[pB*3+2]) / 2;
 
-          const SNAP = 0.08; // weld threshold (world units)
-          if (dist < SNAP) {
-            // Welded: force exact same position, zero relative velocity
+          if (dist < SNAP_DIST) {
+            // Welded: lock both to midpoint, also zero their Verlet velocity
             pos[pA*3]   = pos[pB*3]   = mx;
             pos[pA*3+1] = pos[pB*3+1] = my;
             pos[pA*3+2] = pos[pB*3+2] = mz;
-            // Kill relative velocity so they don't spring apart
-            const rvx = (vel[pA*3]   - vel[pB*3])   * 0.5;
-            const rvy = (vel[pA*3+1] - vel[pB*3+1]) * 0.5;
-            const rvz = (vel[pA*3+2] - vel[pB*3+2]) * 0.5;
-            vel[pA*3]   -= rvx; vel[pB*3]   += rvx;
-            vel[pA*3+1] -= rvy; vel[pB*3+1] += rvy;
-            vel[pA*3+2] -= rvz; vel[pB*3+2] += rvz;
+            // Kill Verlet velocity by setting prev = pos
+            prev[pA*3]   = pos[pA*3];   prev[pB*3]   = pos[pB*3];
+            prev[pA*3+1] = pos[pA*3+1]; prev[pB*3+1] = pos[pB*3+1];
+            prev[pA*3+2] = pos[pA*3+2]; prev[pB*3+2] = pos[pB*3+2];
           } else {
-            // Lerp: 3% per substep at strength=1
-            const rate = strength * 0.03;
+            // Lerp toward midpoint: 2.5% per substep at strength=1
+            const rate = strength * 0.025;
             pos[pA*3]   += (mx - pos[pA*3])   * rate;
             pos[pA*3+1] += (my - pos[pA*3+1]) * rate;
             pos[pA*3+2] += (mz - pos[pA*3+2]) * rate;
@@ -215,21 +214,6 @@ export function FabricTestTab() {
           }
         }
       }
-
-      // 4. Derive velocities from position delta
-      for (let v = 0; v < N; v++) {
-        if (w[v] === 0) continue;
-        vel[v*3]     = (pos[v*3]   - prev[v*3])   / subDt;
-        vel[v*3+1]   = (pos[v*3+1] - prev[v*3+1]) / subDt;
-        vel[v*3+2]   = (pos[v*3+2] - prev[v*3+2]) / subDt;
-      }
-    }
-
-    // 5. Damping once per frame
-    for (let v = 0; v < N; v++) {
-      vel[v*3]   *= 0.99;
-      vel[v*3+1] *= 0.99;
-      vel[v*3+2] *= 0.99;
     }
   }, []);
 
