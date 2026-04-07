@@ -187,10 +187,10 @@ export function ResultViewer3D() {
   const { tiledPattern, gary } = useAppStore();
 
   const garyRef     = useRef(gary);
-  useEffect(() => { garyRef.current = gary; }, [gary]);
 
   const posRef      = useRef<Float32Array | null>(null);
   const prevRef     = useRef<Float32Array | null>(null);
+  const initPosRef  = useRef<Float32Array | null>(null);  // snapshot of initial positions
   const wRef        = useRef<Float32Array | null>(null);
   const consBufRef  = useRef(new Float32Array(0));
   const nConsRef    = useRef(0);
@@ -202,6 +202,23 @@ export function ResultViewer3D() {
   const frameRef    = useRef(0);
   const clothRef    = useRef<THREE.Mesh | null>(null);
   const rafRef      = useRef<number | null>(null);
+
+  // Reset cloth to initial pre-deformed state and restart ramp
+  const resetSimulation = () => {
+    const initPos = initPosRef.current;
+    const pos     = posRef.current;
+    const prev    = prevRef.current;
+    if (!initPos || !pos || !prev) return;
+    pos.set(initPos);
+    prev.set(initPos);
+    frameRef.current = 0;
+  };
+
+  // When gary changes: update ref AND reset simulation so cloth re-settles
+  useEffect(() => {
+    garyRef.current = gary;
+    resetSimulation();
+  }, [gary]);
 
   // ── Simulation step ────────────────────────────────────────────────────────
   const step = () => {
@@ -325,17 +342,18 @@ export function ResultViewer3D() {
     }
 
     const d = buildCloth(tiledPattern);
-    posRef.current    = d.pos;
-    prevRef.current   = d.prev;
-    wRef.current      = d.w;
+    posRef.current     = d.pos;
+    prevRef.current    = d.prev;
+    initPosRef.current = d.pos.slice();  // snapshot for reset
+    wRef.current       = d.w;
     consBufRef.current = d.consBuf;
     nConsRef.current   = d.nCons;
     stPairsRef.current = d.stPairs;
     nStRef.current     = d.nSt;
-    nRef.current      = d.N;
-    cx0Ref.current    = d.centerX;
-    cz0Ref.current    = d.centerZ;
-    frameRef.current  = 0;
+    nRef.current       = d.N;
+    cx0Ref.current     = d.centerX;
+    cz0Ref.current     = d.centerZ;
+    frameRef.current   = 0;
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(d.pos.slice(), 3));
