@@ -29,12 +29,12 @@ const STRUCT_K  = 0.25;  // structural constraint stiffness for relaxation
 interface ClothData {
   N: number;
   fineNx: number; fineNy: number;
-  flatPos: Float32Array;    // flat rest positions
-  smockedPos: Float32Array; // analytically smocked positions
-  displayPos: Float32Array; // current display (lerped + relaxed)
-  strBuf: Float32Array; nStr: number;  // structural edges [a,b,rest]
-  indices: Uint32Array;
-  colors: Float32Array;
+  flatPos: Float32Array<ArrayBuffer>;
+  smockedPos: Float32Array<ArrayBuffer>;
+  displayPos: Float32Array<ArrayBuffer>;
+  strBuf: Float32Array<ArrayBuffer>; nStr: number;
+  indices: Uint32Array<ArrayBuffer>;
+  colors: Float32Array<ArrayBuffer>;
   clothW: number; clothH: number; centerX: number; centerZ: number;
 }
 
