@@ -1,14 +1,13 @@
 /**
- * ResultViewer3D — Smocking cloth simulation
+ * ResultViewer3D — Pure PBD cloth simulation (position-only, no velocity)
  *
- * Stability strategy:
- *  1. Pre-deform: stitch vertices start at Y=0 (flat), "excess fabric" between them
- *     gets initial upward Y bias computed from stitch topology → folds go UP, not random
- *  2. XZ-only stitch: pull stitch pairs together in the XZ plane only, Y is free
- *     → excess fabric is forced upward by floor + structural constraints, not twisted
- *  3. Floor friction: when vertex touches Y=0, XZ velocity is damped → table holds base flat
- *  4. Stitch ramp: compliance goes from 1.0→STITCH_C over RAMP_FRAMES → no initial chaos
- *  5. SUBSTEPS=30, TypedArray constraints for speed
+ * Design:
+ *   - No Verlet / no velocity accumulation → cloth doesn't drift or gather to center
+ *   - Each frame: apply ITERATIONS rounds of constraint projection
+ *   - Constraints: structural distance (cloth stiffness) + XZ-only stitch (smocking)
+ *   - Floor constraint (Y ≥ 0) keeps cloth above table
+ *   - Pre-deformed initial Y seeds fold direction upward
+ *   - Stitch strength ramps up over RAMP_FRAMES to avoid startup chaos
  */
 
 import { useEffect, useRef } from 'react';
@@ -17,29 +16,30 @@ import { useThreeScene } from '../../hooks/useThreeScene';
 import { useAppStore } from '../../store/useAppStore';
 import type { TiledPattern } from '../../types';
 
-const SUBDIV      = 5;
-const SUBSTEPS    = 30;
-const GRAVITY     = -1.0;
-const VDAMP       = 0.998;
-const FLOOR_FRICTION = 0.85;   // XZ velocity multiplier when touching floor (0=frozen, 1=frictionless)
-const STRETCH_C   = 1e-5;
-const BEND_C      = 1e-3;
-const STITCH_C    = 1e-6;      // stiff stitch (closes to 0 distance)
-const RAMP_FRAMES = 360;       // 6 s warm-up at 60 fps (gentle ramp)
-const PREDEFORM_H = 0.4;       // initial Y lift for excess fabric between stitches
+// ── Simulation constants ───────────────────────────────────────────────────────
+const SUBDIV        = 5;
+const ITERATIONS    = 20;          // PBD constraint iterations per frame
+const STRUCT_K      = 0.3;         // structural constraint stiffness (0–1)
+const BEND_K        = 0.05;        // bending constraint stiffness
+const RAMP_FRAMES   = 240;         // frames to ramp stitch from 0 → target
+const PREDEFORM_H   = 0.4;         // initial Y lift height for excess fabric
+const DAMPING       = 0.98;        // gentle position damping each frame
 
 interface ClothData {
   N: number;
-  fineNx: number; fineNy: number;
-  pos: Float32Array; prev: Float32Array; w: Float32Array;
-  consBuf: Float32Array; nCons: number;
-  // XZ-only stitch: stored as [ia, ib] pairs (Int32Array)
+  pos: Float32Array;               // current positions (3N)
+  prev: Float32Array;              // previous positions = initial (for reset)
+  // Structural constraints: packed [a, b, restLen] Float32Array
+  strBuf: Float32Array; nStr: number;
+  bendBuf: Float32Array; nBend: number;
+  // Stitch pairs: Int32Array [a, b, a, b, ...]
   stPairs: Int32Array; nSt: number;
-  indices: Uint32Array; colors: Float32Array;
+  indices: Uint32Array;
+  colors: Float32Array;
   clothW: number; clothH: number; centerX: number; centerZ: number;
 }
 
-// ── Build fine cloth mesh ─────────────────────────────────────────────────────
+// ── Build cloth mesh & constraints ────────────────────────────────────────────
 function buildCloth(pattern: TiledPattern): ClothData {
   const verts  = pattern.vertices;
   const nx     = pattern.tangram.nx;
@@ -58,7 +58,7 @@ function buildCloth(pattern: TiledPattern): ClothData {
   const clothW  = maxX - minX;
   const clothH  = maxZ - minZ;
 
-  // ── Pattern vertex → fine grid index ──────────────────────────────────────
+  // Pattern vertex → fine grid index
   const p2f = (idx: number) => {
     const v  = verts[idx];
     const gx = Math.round(v.x - minX);
@@ -66,7 +66,7 @@ function buildCloth(pattern: TiledPattern): ClothData {
     return (gy * SUBDIV) * fineNx + (gx * SUBDIV);
   };
 
-  // ── Stitch pairs (XZ-only, so just store index pairs) ─────────────────────
+  // Stitch pairs
   const rawSt: number[] = [];
   for (const group of pattern.stitchingLines) {
     for (let a = 0; a < group.length - 1; a++) {
@@ -79,17 +79,14 @@ function buildCloth(pattern: TiledPattern): ClothData {
   }
   const stPairs = new Int32Array(rawSt);
   const nSt     = rawSt.length / 2;
-
-  // ── Pre-compute initial Y bias from stitch topology ────────────────────────
-  // Stitch vertices → Y=0. Vertices "between" stitch pairs → Y=PREDEFORM_H.
   const stitchFineSet = new Set<number>(rawSt);
-  const initY = new Float32Array(N);  // default 0
 
+  // Pre-deform: "excess fabric" between stitch pairs gets upward Y bias
+  const initY = new Float32Array(N);
   for (let i = 0; i < nSt; i++) {
     const ia = stPairs[i*2], ib = stPairs[i*2+1];
     const fxa = ia % fineNx, fya = (ia / fineNx) | 0;
     const fxb = ib % fineNx, fyb = (ib / fineNx) | 0;
-    // Mark vertices on the line segment between ia and ib as "excess fabric"
     const steps = Math.max(Math.abs(fxb - fxa), Math.abs(fyb - fya));
     if (steps < 2) continue;
     for (let t = 1; t < steps; t++) {
@@ -97,88 +94,97 @@ function buildCloth(pattern: TiledPattern): ClothData {
       const fy = Math.round(fya + (fyb - fya) * t / steps);
       const fi = fy * fineNx + fx;
       if (!stitchFineSet.has(fi)) {
-        // Tent shape: peak in the middle
-        const tNorm = t / steps;  // 0..1
-        const tent  = Math.sin(tNorm * Math.PI);  // 0→1→0
-        initY[fi] = Math.max(initY[fi], PREDEFORM_H * tent);
+        initY[fi] = Math.max(initY[fi], PREDEFORM_H * Math.sin((t / steps) * Math.PI));
       }
     }
   }
 
-  // ── Initialize positions ───────────────────────────────────────────────────
+  // Initialize positions
   const pos  = new Float32Array(N * 3);
-  const prev = new Float32Array(N * 3);
-  const w    = new Float32Array(N).fill(1);
+  const prev = new Float32Array(N * 3);  // used as reset snapshot
 
   for (let fy = 0; fy < fineNy; fy++) {
     for (let fx = 0; fx < fineNx; fx++) {
       const i  = fy * fineNx + fx;
       const i3 = i * 3;
       pos[i3]     = minX + (fx / (fineNx - 1)) * clothW;
-      pos[i3 + 1] = initY[i];   // structured initial bias
+      pos[i3 + 1] = initY[i];
       pos[i3 + 2] = minZ + (fy / (fineNy - 1)) * clothH;
       prev[i3] = pos[i3]; prev[i3+1] = pos[i3+1]; prev[i3+2] = pos[i3+2];
     }
   }
 
-  // ── Structural constraints ─────────────────────────────────────────────────
-  const rawCons: number[] = [];
+  // Build structural & bending constraints
+  const rawStr: number[] = [], rawBend: number[] = [];
   const seen = new Set<number>();
-  const addEdge = (a: number, b: number, c: number) => {
+  const addEdge = (buf: number[], a: number, b: number) => {
     const lo = a < b ? a : b, hi = a < b ? b : a;
-    if (seen.has(lo * N + hi)) return;
-    seen.add(lo * N + hi);
+    const key = lo * N + hi;
+    if (seen.has(key)) return; seen.add(key);
     const dx = pos[hi*3] - pos[lo*3];
     const dy = pos[hi*3+1] - pos[lo*3+1];
     const dz = pos[hi*3+2] - pos[lo*3+2];
     const r  = Math.sqrt(dx*dx + dy*dy + dz*dz);
     if (r < 1e-9) return;
-    rawCons.push(lo, hi, r, c);
+    buf.push(lo, hi, r);
   };
 
   for (let fy = 0; fy < fineNy; fy++) {
     for (let fx = 0; fx < fineNx; fx++) {
       const v = fy * fineNx + fx;
-      if (fx + 1 < fineNx) addEdge(v, v + 1, STRETCH_C);
-      if (fy + 1 < fineNy) addEdge(v, v + fineNx, STRETCH_C);
+      if (fx + 1 < fineNx) addEdge(rawStr, v, v + 1);
+      if (fy + 1 < fineNy) addEdge(rawStr, v, v + fineNx);
       if (fx + 1 < fineNx && fy + 1 < fineNy) {
-        addEdge(v, v + fineNx + 1, STRETCH_C);
-        addEdge(v + 1, v + fineNx, STRETCH_C);
+        addEdge(rawStr, v, v + fineNx + 1);
+        addEdge(rawStr, v + 1, v + fineNx);
       }
-      if (fx + 2 < fineNx) addEdge(v, v + 2, BEND_C);
-      if (fy + 2 < fineNy) addEdge(v, v + 2 * fineNx, BEND_C);
+      if (fx + 2 < fineNx) addEdge(rawBend, v, v + 2);
+      if (fy + 2 < fineNy) addEdge(rawBend, v, v + 2 * fineNx);
     }
   }
-  const consBuf = new Float32Array(rawCons);
-  const nCons   = rawCons.length / 4;
+  const strBuf  = new Float32Array(rawStr);  const nStr  = rawStr.length  / 3;
+  const bendBuf = new Float32Array(rawBend); const nBend = rawBend.length / 3;
 
-  // ── Triangle mesh ──────────────────────────────────────────────────────────
+  // Triangle mesh
   const indices = new Uint32Array((fineNy - 1) * (fineNx - 1) * 6);
-  let iPtr = 0;
+  let ip = 0;
   for (let fy = 0; fy < fineNy - 1; fy++) {
     for (let fx = 0; fx < fineNx - 1; fx++) {
       const bl = fy * fineNx + fx, br = bl + 1;
       const tl = bl + fineNx,     tr = tl + 1;
-      indices[iPtr++]=bl; indices[iPtr++]=br; indices[iPtr++]=tr;
-      indices[iPtr++]=bl; indices[iPtr++]=tr; indices[iPtr++]=tl;
+      indices[ip++]=bl; indices[ip++]=br; indices[ip++]=tr;
+      indices[ip++]=bl; indices[ip++]=tr; indices[ip++]=tl;
     }
   }
 
-  // ── Colors ─────────────────────────────────────────────────────────────────
+  // Colors
   const colors = new Float32Array(N * 3);
   for (let i = 0; i < N; i++) {
     const i3 = i * 3;
     if (stitchFineSet.has(i)) {
-      colors[i3]=0.10; colors[i3+1]=0.45; colors[i3+2]=0.90;  // blue = stitch
+      colors[i3]=0.10; colors[i3+1]=0.45; colors[i3+2]=0.90;
     } else if (initY[i] > 0.05) {
-      colors[i3]=0.98; colors[i3+1]=0.60; colors[i3+2]=0.30;  // orange = excess/pleat
+      colors[i3]=0.98; colors[i3+1]=0.60; colors[i3+2]=0.30;
     } else {
-      colors[i3]=0.95; colors[i3+1]=0.45; colors[i3+2]=0.65;  // pink = base
+      colors[i3]=0.95; colors[i3+1]=0.45; colors[i3+2]=0.65;
     }
   }
 
-  return { N, fineNx, fineNy, pos, prev, w, consBuf, nCons,
+  return { N, pos, prev, strBuf, nStr, bendBuf, nBend,
            stPairs, nSt, indices, colors, clothW, clothH, centerX, centerZ };
+}
+
+// ── Apply a single distance constraint (PBD projection) ───────────────────────
+function projectDist(pos: Float32Array, ia: number, ib: number, rest: number, k: number) {
+  const ia3 = ia * 3, ib3 = ib * 3;
+  const dx = pos[ib3]   - pos[ia3];
+  const dy = pos[ib3+1] - pos[ia3+1];
+  const dz = pos[ib3+2] - pos[ia3+2];
+  const d  = Math.sqrt(dx*dx + dy*dy + dz*dz);
+  if (d < 1e-9) return;
+  const corr = (d - rest) / d * k * 0.5;
+  pos[ia3]   += corr * dx; pos[ia3+1] += corr * dy; pos[ia3+2] += corr * dz;
+  pos[ib3]   -= corr * dx; pos[ib3+1] -= corr * dy; pos[ib3+2] -= corr * dz;
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -186,147 +192,87 @@ export function ResultViewer3D() {
   const { containerRef, scene, camera, controls } = useThreeScene();
   const { tiledPattern, gary } = useAppStore();
 
-  const garyRef     = useRef(gary);
+  const garyRef      = useRef(gary);
+  const posRef       = useRef<Float32Array | null>(null);
+  const initPosRef   = useRef<Float32Array | null>(null);
+  const strBufRef    = useRef(new Float32Array(0)); const nStrRef  = useRef(0);
+  const bendBufRef   = useRef(new Float32Array(0)); const nBendRef = useRef(0);
+  const stPairsRef   = useRef(new Int32Array(0));   const nStRef   = useRef(0);
+  const nRef         = useRef(0);
+  const frameRef     = useRef(0);
+  const clothRef     = useRef<THREE.Mesh | null>(null);
+  const rafRef       = useRef<number | null>(null);
 
-  const posRef      = useRef<Float32Array | null>(null);
-  const prevRef     = useRef<Float32Array | null>(null);
-  const initPosRef  = useRef<Float32Array | null>(null);  // snapshot of initial positions
-  const wRef        = useRef<Float32Array | null>(null);
-  const consBufRef  = useRef(new Float32Array(0));
-  const nConsRef    = useRef(0);
-  const stPairsRef  = useRef(new Int32Array(0));
-  const nStRef      = useRef(0);
-  const nRef        = useRef(0);
-  const cx0Ref      = useRef(0);
-  const cz0Ref      = useRef(0);
-  const frameRef    = useRef(0);
-  const clothRef    = useRef<THREE.Mesh | null>(null);
-  const rafRef      = useRef<number | null>(null);
-
-  // Reset cloth to initial pre-deformed state and restart ramp
   const resetSimulation = () => {
     const initPos = initPosRef.current;
     const pos     = posRef.current;
-    const prev    = prevRef.current;
-    if (!initPos || !pos || !prev) return;
+    if (!initPos || !pos) return;
     pos.set(initPos);
-    prev.set(initPos);
     frameRef.current = 0;
   };
 
-  // When gary changes: update ref AND reset simulation so cloth re-settles
   useEffect(() => {
     garyRef.current = gary;
     resetSimulation();
   }, [gary]);
 
-  // ── Simulation step ────────────────────────────────────────────────────────
+  // ── PBD step ────────────────────────────────────────────────────────────────
   const step = () => {
-    const pos  = posRef.current;
-    const prev = prevRef.current;
-    const w    = wRef.current;
-    if (!pos || !prev || !w || nRef.current === 0) return;
+    const pos = posRef.current;
+    if (!pos || nRef.current === 0) return;
 
-    const N    = nRef.current;
-    const subDt = (1 / 60) / SUBSTEPS;
-    const sd2   = subDt * subDt;
-
+    const N       = nRef.current;
     const frame   = frameRef.current++;
     const ramp    = Math.min(frame / RAMP_FRAMES, 1.0);
     const g       = garyRef.current;
-    const doStitch = g < 0.99;
-    // Stitch: starts near-zero force (compliance=2.0), eases to target over RAMP_FRAMES
-    const stitchC = STITCH_C * (1 + g * g * 500) + (1.0 - ramp) * 2.0;
-    // Gravity also ramps up: starts at 10% of full gravity, reaches 100% at ramp=1
-    const gravScale = 0.1 + ramp * 0.9;
+    // Stitch stiffness: 0 when g=1 (no stitch), ramps to (1-g) * ramp
+    const stitchK  = (1.0 - g) * ramp;
+    const doStitch = stitchK > 0.001;
 
-    const cons   = consBufRef.current;
-    const nCons  = nConsRef.current;
-    const stPairs = stPairsRef.current;
-    const nSt    = nStRef.current;
-    const cx0    = cx0Ref.current;
-    const cz0    = cz0Ref.current;
+    const strBuf  = strBufRef.current;  const nStr  = nStrRef.current;
+    const bendBuf = bendBufRef.current; const nBend = nBendRef.current;
+    const stPairs = stPairsRef.current; const nSt   = nStRef.current;
 
-    for (let sub = 0; sub < SUBSTEPS; sub++) {
-      // 1. Verlet predict
-      for (let v = 0; v < N; v++) {
-        if (w[v] === 0) continue;
-        const v3 = v * 3;
-        const vx = (pos[v3]   - prev[v3])   * VDAMP;
-        const vy = (pos[v3+1] - prev[v3+1]) * VDAMP;
-        const vz = (pos[v3+2] - prev[v3+2]) * VDAMP;
-        prev[v3]   = pos[v3];   pos[v3]   += vx;
-        prev[v3+1] = pos[v3+1]; pos[v3+1] += vy + GRAVITY * gravScale * sd2;
-        prev[v3+2] = pos[v3+2]; pos[v3+2] += vz;
+    for (let iter = 0; iter < ITERATIONS; iter++) {
+      // 1. Structural distance constraints
+      for (let i = 0; i < nStr; i++) {
+        const b3 = i * 3;
+        projectDist(pos, strBuf[b3]|0, strBuf[b3+1]|0, strBuf[b3+2], STRUCT_K);
       }
-
-      // 2. Floor constraint + friction
-      for (let v = 0; v < N; v++) {
-        const v3 = v * 3;
-        if (pos[v3 + 1] < 0) {
-          pos[v3 + 1] = 0;
-          if (prev[v3 + 1] > 0) prev[v3 + 1] = 0;
-          // XZ friction: damp the XZ velocity component
-          prev[v3]   = pos[v3]   - (pos[v3]   - prev[v3])   * FLOOR_FRICTION;
-          prev[v3+2] = pos[v3+2] - (pos[v3+2] - prev[v3+2]) * FLOOR_FRICTION;
-        }
+      // 2. Bending constraints (softer)
+      for (let i = 0; i < nBend; i++) {
+        const b3 = i * 3;
+        projectDist(pos, bendBuf[b3]|0, bendBuf[b3+1]|0, bendBuf[b3+2], BEND_K);
       }
-
-      // 3. Structural constraints (XPBD, full 3D)
-      for (let i = 0; i < nCons; i++) {
-        const base = i << 2;
-        const ia   = cons[base]     | 0;
-        const ib   = cons[base + 1] | 0;
-        const r    = cons[base + 2];
-        const c    = cons[base + 3];
-        const wa   = w[ia], wb = w[ib], wS = wa + wb;
-        if (wS === 0) continue;
-        const ia3 = ia * 3, ib3 = ib * 3;
-        const dx = pos[ib3]   - pos[ia3];
-        const dy = pos[ib3+1] - pos[ia3+1];
-        const dz = pos[ib3+2] - pos[ia3+2];
-        const d  = Math.sqrt(dx*dx + dy*dy + dz*dz);
-        if (d < 1e-9) continue;
-        const lam = -(d - r) / (wS + c / sd2);
-        const inv = lam / d;
-        pos[ia3]   -= wa*dx*inv; pos[ia3+1] -= wa*dy*inv; pos[ia3+2] -= wa*dz*inv;
-        pos[ib3]   += wb*dx*inv; pos[ib3+1] += wb*dy*inv; pos[ib3+2] += wb*dz*inv;
-      }
-
-      // 4. XZ-only stitch constraint (pull together in XZ plane, Y is free)
-      //    This ensures excess fabric goes UP, not sideways or twisted
+      // 3. XZ-only stitch constraint: pull pairs toward same XZ point
       if (doStitch) {
         for (let i = 0; i < nSt; i++) {
-          const ia  = stPairs[i*2];
-          const ib  = stPairs[i*2+1];
-          const wa  = w[ia], wb = w[ib], wS = wa + wb;
-          if (wS === 0) continue;
+          const ia  = stPairs[i*2], ib = stPairs[i*2+1];
           const ia3 = ia * 3, ib3 = ib * 3;
-          const dx  = pos[ib3]   - pos[ia3];   // X only
-          const dz  = pos[ib3+2] - pos[ia3+2]; // Z only
-          const d2  = dx*dx + dz*dz;
-          if (d2 < 1e-18) continue;
-          const d   = Math.sqrt(d2);
-          // restLen=0 in XZ
-          const lam = -d / (wS + stitchC / sd2);
-          const inv = lam / d;
-          // Only apply correction in XZ
-          pos[ia3]   -= wa * dx * inv;
-          pos[ia3+2] -= wa * dz * inv;
-          pos[ib3]   += wb * dx * inv;
-          pos[ib3+2] += wb * dz * inv;
+          const dx  = pos[ib3]   - pos[ia3];
+          const dz  = pos[ib3+2] - pos[ia3+2];
+          const d   = Math.sqrt(dx*dx + dz*dz);
+          if (d < 1e-9) continue;
+          // restLen=0 in XZ: move both toward midpoint by stitchK
+          const corr = d * stitchK * 0.5;
+          const nx_  = dx / d, nz_ = dz / d;
+          pos[ia3]   += corr * nx_;  pos[ia3+2] += corr * nz_;
+          pos[ib3]   -= corr * nx_;  pos[ib3+2] -= corr * nz_;
         }
       }
-
-      // 5. COM-XZ correction (prevent lateral drift)
-      let cx = 0, cz = 0;
-      for (let v = 0; v < N; v++) { cx += pos[v*3]; cz += pos[v*3+2]; }
-      cx /= N; cz /= N;
-      const dX = cx - cx0, dZ = cz - cz0;
+      // 4. Floor constraint: Y ≥ 0
       for (let v = 0; v < N; v++) {
-        pos[v*3]   -= dX; prev[v*3]   -= dX;
-        pos[v*3+2] -= dZ; prev[v*3+2] -= dZ;
+        const y = v * 3 + 1;
+        if (pos[y] < 0) pos[y] = 0;
       }
+    }
+
+    // Gentle position damping toward initPos (prevents long-term drift)
+    const initPos = initPosRef.current!;
+    for (let v = 0; v < N; v++) {
+      const v3 = v * 3;
+      // Damp velocity implicitly: blend slightly toward initial Y (keeps cloth grounded)
+      pos[v3+1] = pos[v3+1] * DAMPING + initPos[v3+1] * (1 - DAMPING);
     }
   };
 
@@ -343,17 +289,15 @@ export function ResultViewer3D() {
 
     const d = buildCloth(tiledPattern);
     posRef.current     = d.pos;
-    prevRef.current    = d.prev;
-    initPosRef.current = d.pos.slice();  // snapshot for reset
-    wRef.current       = d.w;
-    consBufRef.current = d.consBuf;
-    nConsRef.current   = d.nCons;
-    stPairsRef.current = d.stPairs;
-    nStRef.current     = d.nSt;
+    initPosRef.current = d.prev;      // prev stores initial snapshot
+    strBufRef.current  = d.strBuf;    nStrRef.current  = d.nStr;
+    bendBufRef.current = d.bendBuf;   nBendRef.current = d.nBend;
+    stPairsRef.current = d.stPairs;   nStRef.current   = d.nSt;
     nRef.current       = d.N;
-    cx0Ref.current     = d.centerX;
-    cz0Ref.current     = d.centerZ;
     frameRef.current   = 0;
+
+    // Sync gary ref in case it changed while tab was inactive
+    garyRef.current = gary;
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(d.pos.slice(), 3));
@@ -361,13 +305,11 @@ export function ResultViewer3D() {
     geo.setIndex(new THREE.BufferAttribute(d.indices, 1));
     geo.computeVertexNormals();
 
-    const mat = new THREE.MeshPhongMaterial({
+    clothRef.current = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
       vertexColors: true,
       side: THREE.DoubleSide,
       shininess: 50,
-      specular: new THREE.Color(0.2, 0.2, 0.2),
-    });
-    clothRef.current = new THREE.Mesh(geo, mat);
+    }));
     scene.current.add(clothRef.current);
 
     if (camera.current && controls.current) {
