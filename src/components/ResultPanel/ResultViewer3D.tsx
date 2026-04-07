@@ -21,8 +21,8 @@ import { useAppStore } from '../../store/useAppStore';
 import type { TiledPattern } from '../../types';
 
 const SUBDIV    = 5;
-const RELAX_ITER = 8;    // PBD relaxation iterations on the morphed mesh (organic feel)
-const STRUCT_K  = 0.25;  // structural constraint stiffness for relaxation
+const RELAX_ITER = 40;   // PBD iterations — more = more inextensible
+const STRUCT_K  = 0.9;   // stiffness → 1.0 = perfectly inextensible
 
 interface ClothData {
   N: number;
