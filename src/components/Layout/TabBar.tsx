@@ -7,20 +7,17 @@ interface TabConfig {
   label: string;
 }
 
-// Shape + Inspector tabs hidden — simulation-focus mode
 const TABS: TabConfig[] = [
-  { id: 'Pattern', icon: '✏️', label: 'Pattern' },
-  { id: 'Result', icon: '🎬', label: 'Simulate' },
-  { id: 'FabricTest', icon: '🧪', label: 'Test' },
+  { id: 'Pattern', icon: '✏️', label: 'Draw' },
+  { id: 'Result',  icon: '🎬', label: 'Simulate' },
 ];
 
 export function MobileTabBar() {
   const { activeTab, setActiveTab } = useAppStore();
-
   return (
-    <div className="md:hidden fixed bottom-0 left-0 right-0 bg-[var(--bg-panel)] border-t border-[var(--border)] z-50 safe-area-inset-bottom">
+    <div className="md:hidden fixed bottom-0 left-0 right-0 bg-[var(--bg-panel)] border-t border-[var(--border)] z-50">
       <div className="flex items-stretch h-16">
-        {TABS.map((tab) => (
+        {TABS.map(tab => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
@@ -30,9 +27,7 @@ export function MobileTabBar() {
                 : 'text-[var(--text-secondary)] active:bg-[var(--bg-hover)]'
             }`}
           >
-            <span className="text-xl" role="img" aria-label={tab.label}>
-              {tab.icon}
-            </span>
+            <span className="text-xl">{tab.icon}</span>
             <span className="text-xs font-medium">{tab.label}</span>
           </button>
         ))}
@@ -43,10 +38,9 @@ export function MobileTabBar() {
 
 export function DesktopTabBar() {
   const { activeTab, setActiveTab } = useAppStore();
-
   return (
     <div className="hidden md:flex h-8 bg-[var(--bg-darkest)] border-b border-[var(--border)] px-2 items-center gap-1">
-      {TABS.slice(0, 4).map((tab) => (
+      {TABS.map(tab => (
         <button
           key={tab.id}
           onClick={() => setActiveTab(tab.id)}
@@ -56,9 +50,7 @@ export function DesktopTabBar() {
               : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'
           }`}
         >
-          <span role="img" aria-label={tab.label}>
-            {tab.icon}
-          </span>
+          <span>{tab.icon}</span>
           <span>{tab.label}</span>
         </button>
       ))}

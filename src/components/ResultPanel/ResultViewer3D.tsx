@@ -297,9 +297,30 @@ function relax(
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
+// ── OBJ export helper ─────────────────────────────────────────────────────────
+function exportOBJ(
+  pos: Float32Array<ArrayBuffer>,
+  indices: Uint32Array<ArrayBuffer>,
+  N: number
+) {
+  const lines: string[] = ['# SmockingCAD export'];
+  for (let i = 0; i < N; i++) {
+    lines.push(`v ${pos[i*3].toFixed(4)} ${pos[i*3+1].toFixed(4)} ${pos[i*3+2].toFixed(4)}`);
+  }
+  for (let i = 0; i < indices.length; i += 3) {
+    lines.push(`f ${indices[i]+1} ${indices[i+1]+1} ${indices[i+2]+1}`);
+  }
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'smocking-export.obj';
+  a.click(); URL.revokeObjectURL(url);
+}
+
 export function ResultViewer3D() {
   const { containerRef, scene, camera, controls } = useThreeScene();
-  const { tiledPattern, gary } = useAppStore();
+  const { tiledPattern, gary, exportTrigger } = useAppStore();
+  const indicesRef = useRef<Uint32Array<ArrayBuffer>>(new Uint32Array(0));
 
   const garyRef       = useRef(gary);
   const flatPosRef    = useRef<Float32Array<ArrayBuffer> | null>(null);
@@ -362,6 +383,7 @@ export function ResultViewer3D() {
     strBufRef.current     = d.strBuf;
     nStrRef.current       = d.nStr;
     nRef.current          = d.N;
+    indicesRef.current    = d.indices;
     currentGaryRef.current = gary;
     garyRef.current        = gary;
 
@@ -386,6 +408,14 @@ export function ResultViewer3D() {
       controls.current.update();
     }
   }, [tiledPattern, scene, camera, controls]);
+
+  // ── Export trigger ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (exportTrigger === 0) return;
+    const pos = displayPosRef.current;
+    const idx = indicesRef.current;
+    if (pos && idx) exportOBJ(pos, idx, nRef.current);
+  }, [exportTrigger]);
 
   // ── RAF loop ───────────────────────────────────────────────────────────────
   useEffect(() => {

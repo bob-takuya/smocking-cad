@@ -22,6 +22,9 @@ import type {
   ActiveTab,
   InspectorTab,
   SavedDesign,
+  StitchLine,
+  PatternSource,
+  GridType,
 } from '../types';
 import { getDefaultShapeParams, generateMesh } from '../engine/shapes';
 import { getPattern, PATTERNS } from '../engine/patterns';
@@ -69,6 +72,14 @@ export const useAppStore = create<AppState>((set, get) => {
     tiledPattern: initialTiledPattern,
     tangramState: initialTangram,
 
+    // Custom pattern editor
+    patternSource: 'preset' as PatternSource,
+    customStitchLines: [] as StitchLine[],
+    patternGridNx: 9,
+    patternGridNy: 7,
+    gridType: 'square' as GridType,
+    exportTrigger: 0,
+
     // Optimization state
     optimizationParams: getDefaultOptimizationParams(),
     optimizationStatus: 'idle',
@@ -85,7 +96,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     // Layout state
     layoutMode: 'Explore',
-    activeTab: 'Shape',
+    activeTab: 'Pattern',
     inspectorOpen: true,
     inspectorTab: 'Optimization',
     exportModalOpen: false,
@@ -242,6 +253,23 @@ export const useAppStore = create<AppState>((set, get) => {
     removeDesign: (id: string) => {
       const designs = get().savedDesigns.filter(d => d.id !== id);
       set({ savedDesigns: designs });
+    },
+
+    // Custom pattern editor
+    setPatternSource: (source: PatternSource) => {
+      set({ patternSource: source });
+    },
+    setCustomStitchLines: (lines: StitchLine[]) => {
+      set({ customStitchLines: lines });
+    },
+    setPatternGrid: (nx: number, ny: number) => {
+      set({ patternGridNx: nx, patternGridNy: ny });
+    },
+    setGridType: (type: GridType) => {
+      set({ gridType: type });
+    },
+    triggerExport: () => {
+      set(s => ({ exportTrigger: s.exportTrigger + 1 }));
     },
   };
 });
