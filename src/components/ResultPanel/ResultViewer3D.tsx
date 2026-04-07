@@ -37,19 +37,30 @@ interface ClothData {
   clothW: number; clothH: number; centerX: number; centerZ: number;
 }
 
-const PLEAT_H = 0.7;   // pleat height multiplier (0.5=shallow, 1.0=tall)
+const PLEAT_H   = 0.7;   // pleat height multiplier
+const PLEAT_SIGMA = 1.2;  // Gaussian influence radius (world units) for Y seed
+const PBD_ITERS = 150;    // offline PBD iterations for smocked shape convergence
+const PBD_K     = 0.4;    // constraint stiffness during offline solve
 
-// ── Analytically compute smocked vertex positions ─────────────────────────────
-// Algorithm:
-//  1. Build stitch graph → connected components → each comp collapses to centroid XZ, Y=0
-//  2. For horizontal pairs: fine vertices between endpoints get arc-length Y arch
-//  3. Interpolate Y from stitch rows to off-rows
-//  4. Light PBD relax (stitch vertices pinned) to smooth cloth
+// ── Universal smocking solver — works for any stitch topology ─────────────────
+//
+// Algorithm (3 steps):
+//  1. Connected components → stitch vertices placed at exact centroid XZ, Y=0
+//  2. Y seed: for each pair, project nearby non-stitch vertices onto pair line
+//             and assign initial Y = h*sin(t·π)*Gaussian(d_perp) — any orientation
+//  3. PBD relax (stitch pinned each iter): structural constraints propagate
+//             the Y deformation to all cloth vertices, resolving arc-length
+//
+// Produces stitchDist=0 for ALL patterns (horizontal, diagonal, V-shape, mixed).
+// Runtime: ~150ms for 1891 vertices (one-time at startup).
 function computeSmockedPos(
-  flatPos: Float32Array<ArrayBuffer>, _N: number, fineNx: number,
-  stPairs: Int32Array<ArrayBuffer>, nSt: number
+  flatPos: Float32Array<ArrayBuffer>, N: number, fineNx: number,
+  stPairs: Int32Array<ArrayBuffer>, nSt: number,
+  strBuf: Float32Array<ArrayBuffer>, nStr: number
 ): { sm: Float32Array<ArrayBuffer>; pinSet: Set<number> } {
   const sm = flatPos.slice();
+  const centX = new Float32Array(N);
+  const centZ = new Float32Array(N);
 
   // ── Step 1: connected components → exact centroid ─────────────────────────
   const adj = new Map<number, number[]>();
@@ -62,7 +73,7 @@ function computeSmockedPos(
   const pinSet  = new Set<number>();
   for (const [v] of adj) {
     if (visited.has(v)) continue;
-    const comp: number[] = [], q = [v];
+    const comp: number[] = [], q: number[] = [v];
     while (q.length) {
       const u = q.shift()!; if (visited.has(u)) continue;
       visited.add(u); comp.push(u);
@@ -73,43 +84,56 @@ function computeSmockedPos(
     cx /= comp.length; cz /= comp.length;
     for (const u of comp) {
       sm[u*3] = cx; sm[u*3+1] = 0; sm[u*3+2] = cz;
+      centX[u] = cx; centZ[u] = cz;
       pinSet.add(u);
     }
   }
 
-  // ── Step 2: arc-length Y for vertices between horizontal pairs ────────────
+  // ── Step 2: Y seed via pair-line projection (works for ANY orientation) ───
   for (let i = 0; i < nSt; i++) {
-    const ia = stPairs[i*2], ib = stPairs[i*2+1];
-    const fya = (ia / fineNx) | 0, fyb = (ib / fineNx) | 0;
-    if (fya !== fyb) continue;  // only horizontal
-    const fxa = ia % fineNx,   fxb = ib % fineNx;
-    const lo = Math.min(fxa, fxb), hi = Math.max(fxa, fxb);
-    const origDist = Math.abs(flatPos[ib*3] - flatPos[ia*3]);
-    const h  = origDist * PLEAT_H;
-    const cx = (flatPos[ia*3] + flatPos[ib*3]) * 0.5;
-    for (let fx = lo + 1; fx < hi; fx++) {
-      const v = fya * fineNx + fx;
+    const ia  = stPairs[i*2], ib = stPairs[i*2+1];
+    const ax  = flatPos[ia*3], az = flatPos[ia*3+2];
+    const bx  = flatPos[ib*3], bz = flatPos[ib*3+2];
+    const pdx = bx - ax, pdz = bz - az;
+    const pLen = Math.sqrt(pdx*pdx + pdz*pdz);
+    if (pLen < 1e-6) continue;
+    const ux = pdx/pLen, uz = pdz/pLen;
+    const h  = pLen * PLEAT_H;
+    const sig2 = PLEAT_SIGMA * PLEAT_SIGMA;
+
+    for (let v = 0; v < N; v++) {
       if (pinSet.has(v)) continue;
-      const t = (fx - lo) / (hi - lo);
-      sm[v*3]   = cx;
-      sm[v*3+1] = Math.max(sm[v*3+1], h * Math.sin(t * Math.PI));
+      const vx = flatPos[v*3], vz = flatPos[v*3+2];
+      const rx = vx - ax, rz = vz - az;
+      const t  = (rx*ux + rz*uz) / pLen;
+      if (t < -0.1 || t > 1.1) continue;  // outside pair + margin
+      const perpX = rx - t*pLen*ux, perpZ = rz - t*pLen*uz;
+      const w = Math.exp(-(perpX*perpX + perpZ*perpZ) / sig2);
+      if (w < 1e-4) continue;
+      const tc = t < 0 ? 0 : t > 1 ? 1 : t;
+      sm[v*3+1] = Math.max(sm[v*3+1], h * Math.sin(tc * Math.PI) * w);
     }
   }
 
-  // ── Step 3: interpolate Y between stitch rows ─────────────────────────────
-  const stitchRows = new Set<number>();
-  for (const v of pinSet) stitchRows.add((v / fineNx) | 0);
-  const sortedRows = [...stitchRows].sort((a, b) => a - b);
-  for (let ri = 0; ri < sortedRows.length - 1; ri++) {
-    const r1 = sortedRows[ri], r2 = sortedRows[ri + 1];
-    for (let fx = 0; fx < fineNx; fx++) {
-      const y1 = sm[(r1*fineNx+fx)*3+1], y2 = sm[(r2*fineNx+fx)*3+1];
-      for (let fy = r1 + 1; fy < r2; fy++) {
-        const v = fy*fineNx+fx;
-        if (pinSet.has(v)) continue;
-        sm[v*3+1] = y1 + (y2 - y1) * (fy - r1) / (r2 - r1);
-      }
+  // ── Step 3: PBD relax (stitch pinned) ─────────────────────────────────────
+  for (let it = 0; it < PBD_ITERS; it++) {
+    for (let i = 0; i < nStr; i++) {
+      const b3 = i*3;
+      const ia = strBuf[b3]|0, ib = strBuf[b3+1]|0, r = strBuf[b3+2];
+      const pA = pinSet.has(ia), pB = pinSet.has(ib);
+      if (pA && pB) continue;
+      const wa = pA ? 0 : 1, wb = pB ? 0 : 1;
+      const ia3 = ia*3, ib3 = ib*3;
+      const dx = sm[ib3]-sm[ia3], dy = sm[ib3+1]-sm[ia3+1], dz = sm[ib3+2]-sm[ia3+2];
+      const d  = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      if (d < 1e-9) continue;
+      const c = (d - r) / d * PBD_K * 0.5;
+      sm[ia3]   += wa*c*dx; sm[ia3+1] += wa*c*dy; sm[ia3+2] += wa*c*dz;
+      sm[ib3]   -= wb*c*dx; sm[ib3+1] -= wb*c*dy; sm[ib3+2] -= wb*c*dz;
     }
+    // Floor + re-pin stitch vertices to their centroids
+    for (let v = 0; v < N; v++) if (sm[v*3+1] < 0) sm[v*3+1] = 0;
+    for (const v of pinSet) { sm[v*3] = centX[v]; sm[v*3+1] = 0; sm[v*3+2] = centZ[v]; }
   }
 
   return { sm, pinSet };
@@ -159,13 +183,7 @@ function buildCloth(pattern: TiledPattern): ClothData {
   const nSt     = rawSt.length/2;
   const stitchSet = new Set<number>(rawSt);
 
-  // Analytical smocked positions
-  const { sm: smockedPos, pinSet } = computeSmockedPos(flatPos, N, fineNx, stPairs, nSt);
-
-  // Display buffer (will be updated each frame)
-  const displayPos = flatPos.slice();
-
-  // Structural edges [a, b, restLen]  — computed from flat positions
+  // Structural edges [a, b, restLen]  — computed from flat positions (needed by smocked solver)
   const rawStr: number[] = [];
   const seen = new Set<number>();
   const addEdge = (a: number, b: number) => {
@@ -184,6 +202,14 @@ function buildCloth(pattern: TiledPattern): ClothData {
     if (fx+1<fineNx&&fy+1<fineNy){ addEdge(v,v+fineNx+1); addEdge(v+1,v+fineNx); }
   }
   const strBuf = new Float32Array(rawStr), nStr = rawStr.length/3;
+
+  // Analytical smocked positions (universal: horizontal, diagonal, V-shape, mixed)
+  const { sm: smockedPos, pinSet } = computeSmockedPos(
+    flatPos, N, fineNx, stPairs, nSt, strBuf, nStr
+  );
+
+  // Display buffer (will be updated each frame)
+  const displayPos = flatPos.slice();
 
   // Triangles
   const indices = new Uint32Array((fineNy-1)*(fineNx-1)*6);
