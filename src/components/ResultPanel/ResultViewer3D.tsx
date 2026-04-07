@@ -304,7 +304,7 @@ export function ResultViewer3D() {
       if (!clothRef.current || !displayPosRef.current) return;
       step();
       const attr = clothRef.current.geometry.getAttribute('position') as THREE.BufferAttribute;
-      attr.array.set(displayPosRef.current);
+      (attr.array as Float32Array).set(displayPosRef.current);
       attr.needsUpdate = true;
       clothRef.current.geometry.computeVertexNormals();
     };
