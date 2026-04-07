@@ -39,6 +39,7 @@ interface ClothData {
 
 const PLEAT_H    = 0.7;  // pleat height multiplier (pairLen × H = arch peak)
 const PLEAT_SIGMA = 1.2;  // Gaussian radius (world units) — controls pleat width
+const SMOOTH_ITER = 30;   // PBD smoothing passes AFTER analytical shape (safe: arch≈satisfied)
 
 // ── Universal smocking solver — pure analytical, no PBD ──────────────────────
 //
@@ -62,7 +63,7 @@ const PLEAT_SIGMA = 1.2;  // Gaussian radius (world units) — controls pleat wi
 function computeSmockedPos(
   flatPos: Float32Array<ArrayBuffer>, N: number, _fineNx: number,
   stPairs: Int32Array<ArrayBuffer>, nSt: number,
-  _strBuf: Float32Array<ArrayBuffer>, _nStr: number
+  strBuf: Float32Array<ArrayBuffer>, nStr: number
 ): { sm: Float32Array<ArrayBuffer>; pinSet: Set<number> } {
   const sm = flatPos.slice();
 
@@ -137,6 +138,31 @@ function computeSmockedPos(
     }
   }
 
+  // ── Step 3: PBD smoothing on analytical shape (safe: arch ≈ satisfied) ────
+  // Starting from the arch, consecutive arch vertices are ~0.2 apart (rest length).
+  // PBD only makes small corrections → smooths Gaussian artifacts without collapsing.
+  // Stitch vertices are re-pinned every iteration.
+  const centX2 = new Float32Array(N), centZ2 = new Float32Array(N);
+  for (const v of pinSet) { centX2[v] = sm[v*3]; centZ2[v] = sm[v*3+2]; }
+  for (let it = 0; it < SMOOTH_ITER; it++) {
+    for (let i = 0; i < nStr; i++) {
+      const b3 = i*3;
+      const ia = strBuf[b3]|0, ib = strBuf[b3+1]|0, r = strBuf[b3+2];
+      const pA = pinSet.has(ia), pB = pinSet.has(ib);
+      if (pA && pB) continue;
+      const wa = pA ? 0 : 1, wb = pB ? 0 : 1;
+      const ia3 = ia*3, ib3 = ib*3;
+      const dx = sm[ib3]-sm[ia3], dy = sm[ib3+1]-sm[ia3+1], dz = sm[ib3+2]-sm[ia3+2];
+      const d  = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      if (d < 1e-9) continue;
+      const c = (d - r) / d * 0.5 * 0.5;
+      sm[ia3]   += wa*c*dx; sm[ia3+1] += wa*c*dy; sm[ia3+2] += wa*c*dz;
+      sm[ib3]   -= wb*c*dx; sm[ib3+1] -= wb*c*dy; sm[ib3+2] -= wb*c*dz;
+    }
+    for (let v = 0; v < N; v++) if (sm[v*3+1] < 0) sm[v*3+1] = 0;
+    for (const v of pinSet) { sm[v*3] = centX2[v]; sm[v*3+1] = 0; sm[v*3+2] = centZ2[v]; }
+  }
+
   return { sm, pinSet };
 }
 
@@ -206,7 +232,7 @@ function buildCloth(pattern: TiledPattern): ClothData {
 
   // Analytical smocked positions (universal: horizontal, diagonal, V-shape, mixed)
   const { sm: smockedPos, pinSet } = computeSmockedPos(
-    flatPos, N, fineNx, stPairs, nSt, strBuf, nStr  // strBuf/nStr unused in solver (see comments)
+    flatPos, N, fineNx, stPairs, nSt, strBuf, nStr
   );
 
   // Display buffer (will be updated each frame)
