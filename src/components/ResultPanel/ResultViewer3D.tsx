@@ -21,8 +21,6 @@ import { useAppStore } from '../../store/useAppStore';
 import type { TiledPattern } from '../../types';
 
 const SUBDIV    = 5;
-const SIGMA     = 0.9;   // Gaussian influence radius (world units) for stitch pairs
-const PLEAT_H   = 0.55;  // multiplier for pleat height (1.0 = semicircle, <1 = flatter)
 const RELAX_ITER = 8;    // PBD relaxation iterations on the morphed mesh (organic feel)
 const STRUCT_K  = 0.25;  // structural constraint stiffness for relaxation
 
@@ -32,65 +30,89 @@ interface ClothData {
   flatPos: Float32Array<ArrayBuffer>;
   smockedPos: Float32Array<ArrayBuffer>;
   displayPos: Float32Array<ArrayBuffer>;
+  pinSet: Set<number>;               // stitch vertex indices (pinned during relax)
   strBuf: Float32Array<ArrayBuffer>; nStr: number;
   indices: Uint32Array<ArrayBuffer>;
   colors: Float32Array<ArrayBuffer>;
   clothW: number; clothH: number; centerX: number; centerZ: number;
 }
 
-// ── Analytically compute smocked vertex positions ─────────────────────────────
-function computeSmockedPos(
-  flatPos: Float32Array<ArrayBuffer>, N: number,
-  stPairs: Int32Array<ArrayBuffer>, nSt: number
-): Float32Array<ArrayBuffer> {
-  const smocked = flatPos.slice();
-  const dispX = new Float32Array(N);
-  const dispY = new Float32Array(N);
-  const dispZ = new Float32Array(N);
-  const wTot  = new Float32Array(N);
+const PLEAT_H = 0.7;   // pleat height multiplier (0.5=shallow, 1.0=tall)
 
+// ── Analytically compute smocked vertex positions ─────────────────────────────
+// Algorithm:
+//  1. Build stitch graph → connected components → each comp collapses to centroid XZ, Y=0
+//  2. For horizontal pairs: fine vertices between endpoints get arc-length Y arch
+//  3. Interpolate Y from stitch rows to off-rows
+//  4. Light PBD relax (stitch vertices pinned) to smooth cloth
+function computeSmockedPos(
+  flatPos: Float32Array<ArrayBuffer>, N: number, fineNx: number,
+  stPairs: Int32Array<ArrayBuffer>, nSt: number
+): { sm: Float32Array<ArrayBuffer>; pinSet: Set<number> } {
+  const sm = flatPos.slice();
+
+  // ── Step 1: connected components → exact centroid ─────────────────────────
+  const adj = new Map<number, number[]>();
+  for (let i = 0; i < nSt; i++) {
+    const a = stPairs[i*2], b = stPairs[i*2+1];
+    if (!adj.has(a)) adj.set(a, []); if (!adj.has(b)) adj.set(b, []);
+    adj.get(a)!.push(b); adj.get(b)!.push(a);
+  }
+  const visited = new Set<number>();
+  const pinSet  = new Set<number>();
+  for (const [v] of adj) {
+    if (visited.has(v)) continue;
+    const comp: number[] = [], q = [v];
+    while (q.length) {
+      const u = q.shift()!; if (visited.has(u)) continue;
+      visited.add(u); comp.push(u);
+      for (const w of adj.get(u)!) q.push(w);
+    }
+    let cx = 0, cz = 0;
+    for (const u of comp) { cx += flatPos[u*3]; cz += flatPos[u*3+2]; }
+    cx /= comp.length; cz /= comp.length;
+    for (const u of comp) {
+      sm[u*3] = cx; sm[u*3+1] = 0; sm[u*3+2] = cz;
+      pinSet.add(u);
+    }
+  }
+
+  // ── Step 2: arc-length Y for vertices between horizontal pairs ────────────
   for (let i = 0; i < nSt; i++) {
     const ia = stPairs[i*2], ib = stPairs[i*2+1];
-    const ax = flatPos[ia*3],   az = flatPos[ia*3+2];
-    const bx = flatPos[ib*3],   bz = flatPos[ib*3+2];
-    const pdx = bx - ax, pdz = bz - az;
-    const pLen = Math.sqrt(pdx*pdx + pdz*pdz);
-    if (pLen < 1e-6) continue;
-    const ux = pdx/pLen, uz = pdz/pLen;
-    const mx = (ax+bx)*0.5, mz = (az+bz)*0.5;
-    const h = pLen * PLEAT_H;  // pleat peak height
-
-    for (let v = 0; v < N; v++) {
-      const vx = flatPos[v*3], vz = flatPos[v*3+2];
-      const rx = vx - ax, rz = vz - az;
-      // Parameter along pair line
-      const t = (rx*ux + rz*uz) / pLen;
-      // Perpendicular distance
-      const px = rx - t*pLen*ux, pz = rz - t*pLen*uz;
-      const dPerp2 = px*px + pz*pz;
-      const w = Math.exp(-dPerp2 / (SIGMA*SIGMA));
-      if (w < 1e-4) continue;
-
-      const tc = t < 0 ? 0 : t > 1 ? 1 : t;
-      // XZ: projected position on line → midpoint
-      const projX = ax + tc*pdx, projZ = az + tc*pdz;
-      dispX[v] += (mx - projX) * w;
-      dispZ[v] += (mz - projZ) * w;
-      // Y: sinusoidal arch
-      dispY[v] += h * Math.sin(tc * Math.PI) * w;
-      wTot[v]  += w;
+    const fya = (ia / fineNx) | 0, fyb = (ib / fineNx) | 0;
+    if (fya !== fyb) continue;  // only horizontal
+    const fxa = ia % fineNx,   fxb = ib % fineNx;
+    const lo = Math.min(fxa, fxb), hi = Math.max(fxa, fxb);
+    const origDist = Math.abs(flatPos[ib*3] - flatPos[ia*3]);
+    const h  = origDist * PLEAT_H;
+    const cx = (flatPos[ia*3] + flatPos[ib*3]) * 0.5;
+    for (let fx = lo + 1; fx < hi; fx++) {
+      const v = fya * fineNx + fx;
+      if (pinSet.has(v)) continue;
+      const t = (fx - lo) / (hi - lo);
+      sm[v*3]   = cx;
+      sm[v*3+1] = Math.max(sm[v*3+1], h * Math.sin(t * Math.PI));
     }
   }
 
-  for (let v = 0; v < N; v++) {
-    const w = wTot[v];
-    if (w > 0.01) {
-      smocked[v*3]   = flatPos[v*3]   + dispX[v]/w;
-      smocked[v*3+1] = Math.max(0, dispY[v]/w);
-      smocked[v*3+2] = flatPos[v*3+2] + dispZ[v]/w;
+  // ── Step 3: interpolate Y between stitch rows ─────────────────────────────
+  const stitchRows = new Set<number>();
+  for (const v of pinSet) stitchRows.add((v / fineNx) | 0);
+  const sortedRows = [...stitchRows].sort((a, b) => a - b);
+  for (let ri = 0; ri < sortedRows.length - 1; ri++) {
+    const r1 = sortedRows[ri], r2 = sortedRows[ri + 1];
+    for (let fx = 0; fx < fineNx; fx++) {
+      const y1 = sm[(r1*fineNx+fx)*3+1], y2 = sm[(r2*fineNx+fx)*3+1];
+      for (let fy = r1 + 1; fy < r2; fy++) {
+        const v = fy*fineNx+fx;
+        if (pinSet.has(v)) continue;
+        sm[v*3+1] = y1 + (y2 - y1) * (fy - r1) / (r2 - r1);
+      }
     }
   }
-  return smocked;
+
+  return { sm, pinSet };
 }
 
 // ── Build cloth ───────────────────────────────────────────────────────────────
@@ -138,7 +160,7 @@ function buildCloth(pattern: TiledPattern): ClothData {
   const stitchSet = new Set<number>(rawSt);
 
   // Analytical smocked positions
-  const smockedPos = computeSmockedPos(flatPos, N, stPairs, nSt);
+  const { sm: smockedPos, pinSet } = computeSmockedPos(flatPos, N, fineNx, stPairs, nSt);
 
   // Display buffer (will be updated each frame)
   const displayPos = flatPos.slice();
@@ -185,26 +207,39 @@ function buildCloth(pattern: TiledPattern): ClothData {
     }
   }
 
-  return { N, fineNx, fineNy, flatPos, smockedPos, displayPos,
+  return { N, fineNx, fineNy, flatPos, smockedPos, displayPos, pinSet,
            strBuf, nStr, indices, colors, clothW, clothH, centerX, centerZ };
 }
 
-// ── Light PBD relaxation on morphed mesh (smooths stretching artifacts) ───────
-function relax(pos: Float32Array<ArrayBuffer>, strBuf: Float32Array<ArrayBuffer>, nStr: number) {
-  for (let iter=0; iter<RELAX_ITER; iter++) {
-    for (let i=0; i<nStr; i++) {
-      const b3=i*3;
-      const ia=strBuf[b3]|0, ib=strBuf[b3+1]|0, r=strBuf[b3+2];
-      const ia3=ia*3, ib3=ib*3;
-      const dx=pos[ib3]-pos[ia3], dy=pos[ib3+1]-pos[ia3+1], dz=pos[ib3+2]-pos[ia3+2];
-      const d=Math.sqrt(dx*dx+dy*dy+dz*dz);
-      if (d<1e-9) continue;
-      const corr=(d-r)/d*STRUCT_K*0.5;
-      pos[ia3]  +=corr*dx; pos[ia3+1]+=corr*dy; pos[ia3+2]+=corr*dz;
-      pos[ib3]  -=corr*dx; pos[ib3+1]-=corr*dy; pos[ib3+2]-=corr*dz;
+// ── Light PBD relaxation — stitch vertices pinned to smocked position ────────
+function relax(
+  pos: Float32Array<ArrayBuffer>,
+  smocked: Float32Array<ArrayBuffer>,
+  pinSet: Set<number>,
+  strBuf: Float32Array<ArrayBuffer>, nStr: number
+) {
+  for (let iter = 0; iter < RELAX_ITER; iter++) {
+    for (let i = 0; i < nStr; i++) {
+      const b3 = i*3;
+      const ia = strBuf[b3]|0, ib = strBuf[b3+1]|0, r = strBuf[b3+2];
+      const pinA = pinSet.has(ia), pinB = pinSet.has(ib);
+      if (pinA && pinB) continue;
+      const wa = pinA ? 0 : 1, wb = pinB ? 0 : 1;
+      const ia3 = ia*3, ib3 = ib*3;
+      const dx = pos[ib3]-pos[ia3], dy = pos[ib3+1]-pos[ia3+1], dz = pos[ib3+2]-pos[ia3+2];
+      const d = Math.sqrt(dx*dx+dy*dy+dz*dz);
+      if (d < 1e-9) continue;
+      const corr = (d-r)/d * STRUCT_K * 0.5;
+      pos[ia3]   += wa*corr*dx; pos[ia3+1] += wa*corr*dy; pos[ia3+2] += wa*corr*dz;
+      pos[ib3]   -= wb*corr*dx; pos[ib3+1] -= wb*corr*dy; pos[ib3+2] -= wb*corr*dz;
     }
-    // Floor
-    for (let v=0; v<pos.length/3; v++) if (pos[v*3+1]<0) pos[v*3+1]=0;
+    // Floor + re-pin stitch vertices
+    for (let v = 0; v < pos.length/3; v++) {
+      if (pos[v*3+1] < 0) pos[v*3+1] = 0;
+    }
+    for (const v of pinSet) {
+      pos[v*3] = smocked[v*3]; pos[v*3+1] = smocked[v*3+1]; pos[v*3+2] = smocked[v*3+2];
+    }
   }
 }
 
@@ -217,6 +252,7 @@ export function ResultViewer3D() {
   const flatPosRef    = useRef<Float32Array<ArrayBuffer> | null>(null);
   const smockedPosRef = useRef<Float32Array<ArrayBuffer> | null>(null);
   const displayPosRef = useRef<Float32Array<ArrayBuffer> | null>(null);
+  const pinSetRef     = useRef<Set<number>>(new Set());
   const strBufRef     = useRef<Float32Array<ArrayBuffer>>(new Float32Array(0));
   const nStrRef       = useRef(0);
   const nRef          = useRef(0);
@@ -248,9 +284,9 @@ export function ResultViewer3D() {
       display[v3+2] = flat[v3+2] + (smocked[v3+2] - flat[v3+2]) * t;
     }
 
-    // Light PBD relaxation to remove stretching artifacts from the lerp
+    // Light PBD relaxation (stitch vertices pinned)
     if (t > 0.01) {
-      relax(display, strBufRef.current, nStrRef.current);
+      relax(display, smocked, pinSetRef.current, strBufRef.current, nStrRef.current);
     }
   };
 
@@ -269,6 +305,7 @@ export function ResultViewer3D() {
     flatPosRef.current    = d.flatPos;
     smockedPosRef.current = d.smockedPos;
     displayPosRef.current = d.displayPos;
+    pinSetRef.current     = d.pinSet;
     strBufRef.current     = d.strBuf;
     nStrRef.current       = d.nStr;
     nRef.current          = d.N;
