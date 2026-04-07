@@ -46,7 +46,7 @@ const PLEAT_H = 0.7;   // pleat height multiplier (0.5=shallow, 1.0=tall)
 //  3. Interpolate Y from stitch rows to off-rows
 //  4. Light PBD relax (stitch vertices pinned) to smooth cloth
 function computeSmockedPos(
-  flatPos: Float32Array<ArrayBuffer>, N: number, fineNx: number,
+  flatPos: Float32Array<ArrayBuffer>, _N: number, fineNx: number,
   stPairs: Int32Array<ArrayBuffer>, nSt: number
 ): { sm: Float32Array<ArrayBuffer>; pinSet: Set<number> } {
   const sm = flatPos.slice();
