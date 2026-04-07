@@ -180,7 +180,7 @@ export interface Singularity {
 export type LayoutMode = 'Explore' | 'ShapeFocus' | 'PatternFocus' | 'ResultFocus';
 export type InspectorTab = 'Optimization' | 'Singularities' | 'Analysis' | 'Compare';
 export type ResultDisplayMode = 'Smocked' | 'Heatmap' | 'PleatQuality' | 'TangramOverlay' | 'Transparent';
-export type ActiveTab = 'Shape' | 'Pattern' | 'Result' | 'Inspector' | 'FabricTest';
+export type ActiveTab = 'Pattern' | 'Result';
 
 // ============================================================
 // Export Types
@@ -220,6 +220,11 @@ export interface SavedDesign {
   thumbnail?: string;
 }
 
+// Custom pattern: grid coords [x, y] for each point in a stitch line
+export type StitchLine = Array<[number, number]>;
+export type GridType = 'square' | 'triangle';
+export type PatternSource = 'preset' | 'custom';
+
 export interface AppState {
   // Shape
   selectedShape: ShapePreset;
@@ -234,6 +239,14 @@ export interface AppState {
   gary: number;  // 0 = closed, 1 = open
   tiledPattern: TiledPattern | null;
   tangramState: TangramState | null;
+
+  // Custom pattern editor
+  patternSource: PatternSource;          // 'preset' | 'custom'
+  customStitchLines: StitchLine[];       // user-drawn stitch lines (grid coords)
+  patternGridNx: number;                 // editor grid columns (default 9)
+  patternGridNy: number;                 // editor grid rows (default 7)
+  gridType: GridType;                    // 'square' | 'triangle'
+  exportTrigger: number;                 // increment to trigger OBJ export
 
   // Optimization
   optimizationParams: OptimizationParams;
@@ -285,4 +298,10 @@ export interface AppState {
   setExportModalOpen: (open: boolean) => void;
   saveDesign: (name: string) => void;
   removeDesign: (id: string) => void;
+  // Custom pattern editor
+  setPatternSource: (s: PatternSource) => void;
+  setCustomStitchLines: (lines: StitchLine[]) => void;
+  setPatternGrid: (nx: number, ny: number) => void;
+  setGridType: (t: GridType) => void;
+  triggerExport: () => void;
 }

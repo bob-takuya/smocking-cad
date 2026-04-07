@@ -1,14 +1,13 @@
 import { useAppStore } from '../../store/useAppStore';
-import { Select, Button } from '../ui';
+import { Button } from '../ui';
 import type { ResultDisplayMode } from '../../types';
 
 const DISPLAY_MODES: { value: ResultDisplayMode; label: string }[] = [
   { value: 'Smocked', label: 'Smocked' },
-  { value: 'Heatmap', label: 'Heatmap' },
-  { value: 'PleatQuality', label: 'Pleat Quality' },
-  { value: 'TangramOverlay', label: 'Tangram Overlay' },
   { value: 'Transparent', label: 'Transparent' },
 ];
+
+
 
 export function ResultControls() {
   const {
@@ -18,6 +17,7 @@ export function ResultControls() {
     setShowFront,
     gary,
     setGary,
+    triggerExport,
   } = useAppStore();
 
   return (
@@ -61,31 +61,37 @@ export function ResultControls() {
           🔄 Reset to Smocked
         </Button>
 
-        <Select
-          label="Display Mode"
-          options={DISPLAY_MODES}
-          value={resultDisplayMode}
-          onChange={(v) => setResultDisplayMode(v as ResultDisplayMode)}
-        />
+        <div className="flex gap-1">
+          {DISPLAY_MODES.map(m => (
+            <Button
+              key={m.value}
+              size="sm"
+              variant={resultDisplayMode === m.value ? 'primary' : 'secondary'}
+              onClick={() => setResultDisplayMode(m.value as ResultDisplayMode)}
+              className="flex-1"
+            >
+              {m.label}
+            </Button>
+          ))}
+        </div>
 
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-[var(--text-secondary)]">Side:</span>
-          <div className="flex gap-1">
-            <Button
-              size="sm"
-              variant={showFront ? 'primary' : 'secondary'}
-              onClick={() => setShowFront(true)}
-            >
-              Front
-            </Button>
-            <Button
-              size="sm"
-              variant={!showFront ? 'primary' : 'secondary'}
-              onClick={() => setShowFront(false)}
-            >
-              Back
-            </Button>
-          </div>
+        <div className="flex gap-1">
+          <Button size="sm" variant={showFront ? 'primary' : 'secondary'}
+            onClick={() => setShowFront(true)} className="flex-1">Front</Button>
+          <Button size="sm" variant={!showFront ? 'primary' : 'secondary'}
+            onClick={() => setShowFront(false)} className="flex-1">Back</Button>
+        </div>
+
+        {/* Export */}
+        <div className="border-t border-[var(--border)] pt-2">
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={triggerExport}
+            className="w-full"
+          >
+            💾 Export OBJ
+          </Button>
         </div>
       </div>
     </div>
