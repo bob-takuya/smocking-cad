@@ -40,9 +40,9 @@ interface ClothData {
 
 // ── Analytically compute smocked vertex positions ─────────────────────────────
 function computeSmockedPos(
-  flatPos: Float32Array, N: number,
-  stPairs: Int32Array, nSt: number
-): Float32Array {
+  flatPos: Float32Array<ArrayBuffer>, N: number,
+  stPairs: Int32Array<ArrayBuffer>, nSt: number
+): Float32Array<ArrayBuffer> {
   const smocked = flatPos.slice();
   const dispX = new Float32Array(N);
   const dispY = new Float32Array(N);
@@ -190,7 +190,7 @@ function buildCloth(pattern: TiledPattern): ClothData {
 }
 
 // ── Light PBD relaxation on morphed mesh (smooths stretching artifacts) ───────
-function relax(pos: Float32Array, strBuf: Float32Array, nStr: number) {
+function relax(pos: Float32Array<ArrayBuffer>, strBuf: Float32Array<ArrayBuffer>, nStr: number) {
   for (let iter=0; iter<RELAX_ITER; iter++) {
     for (let i=0; i<nStr; i++) {
       const b3=i*3;
@@ -214,10 +214,10 @@ export function ResultViewer3D() {
   const { tiledPattern, gary } = useAppStore();
 
   const garyRef       = useRef(gary);
-  const flatPosRef    = useRef<Float32Array | null>(null);
-  const smockedPosRef = useRef<Float32Array | null>(null);
-  const displayPosRef = useRef<Float32Array | null>(null);
-  const strBufRef     = useRef(new Float32Array(0));
+  const flatPosRef    = useRef<Float32Array<ArrayBuffer> | null>(null);
+  const smockedPosRef = useRef<Float32Array<ArrayBuffer> | null>(null);
+  const displayPosRef = useRef<Float32Array<ArrayBuffer> | null>(null);
+  const strBufRef     = useRef<Float32Array<ArrayBuffer>>(new Float32Array(0));
   const nStrRef       = useRef(0);
   const nRef          = useRef(0);
   const clothRef      = useRef<THREE.Mesh | null>(null);
@@ -304,7 +304,7 @@ export function ResultViewer3D() {
       if (!clothRef.current || !displayPosRef.current) return;
       step();
       const attr = clothRef.current.geometry.getAttribute('position') as THREE.BufferAttribute;
-      (attr.array as Float32Array).set(displayPosRef.current);
+      attr.array.set(displayPosRef.current);
       attr.needsUpdate = true;
       clothRef.current.geometry.computeVertexNormals();
     };
