@@ -18,8 +18,8 @@ export function ResultPanel() {
       }
     >
       <div className="flex flex-col h-full min-h-0">
-        {/* 3D Viewer */}
-        <div className="flex-1 relative">
+        {/* 3D Viewer — min-h-0 prevents flex from ignoring overflow */}
+        <div className="flex-1 relative min-h-0">
           <ResultViewer3D />
 
           {/* Stats overlay */}
