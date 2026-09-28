@@ -1,156 +1,86 @@
 # SmockingCAD
 
-An interactive browser-based CAD tool for designing fabric tessellations using smocking techniques. Based on the paper "Fabric Tessellation: Realizing Freeform Surfaces by Smocking" (Segall et al., ACM TOG 2024).
+A browser-based tool for drawing smocking stitch patterns and previewing how the fabric gathers in 3D, inspired by *Fabric Tessellation: Realizing Freeform Surfaces by Smocking* (Segall et al., ACM TOG 2024).
 
-## Features
+スモッキング（布を縫い縮めて立体をつくる手芸技法）のステッチパターンを描き、縫い縮めた形をブラウザで3Dプレビューするツール（プロトタイプ）。
 
-- **3D Target Shape Design**: Create target surfaces using parametric shapes (hemisphere, sphere, torus, hyperboloid, hyperbolic paraboloid) or import custom OBJ/STL files
-- **Smocking Pattern Library**: Eight preset patterns including Arrow, WaterBomb, Resch-4, Braid, Leaf, Box, Brick, and Diamond
-- **Interactive Tangram Visualization**: Real-time 2D pattern preview with open/closed state animation via eta slider
-- **Curvature Analysis**: Gaussian and mean curvature visualization on target meshes
-- **Optimization Engine**: Inverse design optimization to match target shapes
-- **Export Options**: SVG, DXF (CAD), PDF, OBJ, STL, and project files
+## Status
 
-## Live Demo
+**Prototype.** The pattern editor and 3D preview work and were used for a workshop; much of the larger CAD feature set (target shapes, optimization, multi-format export) exists as engine code but is not connected to the current UI.
 
-Visit: [https://bob-takuya.github.io/smocking-cad](https://bob-takuya.github.io/smocking-cad)
+- ✅ **Works**
+  - Pattern editor: 7 preset patterns (Arrow, Leaf, Braid, Box, Brick, TwistedSquare, Heart), or draw your own stitch lines on a square or triangular grid
+  - Import stitch lines from a DXF file (Draw mode)
+  - Tiling: set U/V repeats; in Draw mode the repeat cell can be resized by dragging
+  - 3D preview with a "Stitch Strength" slider (flat ↔ fully smocked)
+  - Export the preview mesh as OBJ ("Export OBJ" button under the 3D view)
+  - Responsive layout: two columns on desktop, Draw / Simulate tabs on mobile
+  - `npm run build` succeeds
+- 🚧 **Partial**
+  - The 3D preview is a *geometric approximation* (Gaussian stitch-pair field, raised-cosine arches, Laplacian smoothing and a short xPBD pass), not a physical cloth simulation and not the paper's optimization
+  - Engine modules for target shapes (hemisphere, sphere, torus, hyperboloid, hyperbolic paraboloid, OBJ/STL import), curvature analysis, inverse-design optimization, and SVG / DXF / PDF / STL / project export exist in `src/engine/` and in components (`ShapePanel`, `TangramPanel`, `InspectorPanel`, `ExportModal`, `FabricTestTab`), but these components are **not mounted** in `App.tsx`, so they are not reachable from the UI
+  - The optimization's shape energy is simplified (uses a fixed target edge-length ratio instead of the target mesh)
+- 📝 **Not implemented**
+  - File menu: Open Project / Save Project; Edit menu: Undo / Redo / Reset Pattern / Reset Shape; View menu: Reset Camera / Fit to View (menu items exist but do nothing)
+  - Keyboard shortcuts
+  - The full inverse-design pipeline from the paper (target surface → smocking pattern)
+- ⚠️ **Known issues**
+  - The "Export" buttons in the header and the Result panel do nothing (they open an export dialog that is never rendered). Use "Export OBJ" instead
+  - `npm run lint` reports several errors (unused variables etc.)
+  - The repository contains a committed `.npm-cache/` directory that should not be there
+  - Development continued after the last push; newer work-in-progress exists that isn't pushed yet
 
-## Tech Stack
+## Demo
 
-- React 18 + TypeScript
-- Vite (build tool)
-- Three.js (3D rendering)
-- D3.js (2D SVG visualization)
-- Zustand (state management)
-- Tailwind CSS v4 (styling)
-- jsPDF (PDF export)
+The GitHub Pages workflow (`.github/workflows/deploy.yml`) builds `main` and publishes it to:
+https://bob-takuya.github.io/smocking-cad/
 
-## Getting Started
+## Background
 
-### Prerequisites
-
-- Node.js 18+
-- npm or yarn
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/bob-takuya/smocking-cad.git
-cd smocking-cad
-
-# Install dependencies
-npm install
-
-# Start development server
-npm run dev
-```
-
-### Build
-
-```bash
-npm run build
-```
-
-The built files will be in the `dist` directory.
+Built in spring 2026 as the tool for a smocking workshop held at the a university festival in May 2026. Visitors drew or picked a stitch pattern and checked the gathered shape on screen before sewing. The starting point was the smocking research by Segall et al. (2024); this project implements an interactive pattern-and-preview part, not the paper's full method.
 
 ## Usage
 
-### 1. Select Target Shape
+1. **Pattern** (left panel): choose *Preset* and pick a pattern, or choose *Draw* and click grid points to draw stitch lines (Enter / Esc finishes a line). In Draw mode, editing is locked unless the stitch-strength slider is at *Flat*.
+2. Adjust the U/V repeats (and, in Draw mode, the size of the repeat cell).
+3. **Result** (right panel): move *Stitch Strength* to see the fabric gather.
+4. Click **Export OBJ** to download the current 3D mesh.
 
-In the left panel, choose from preset shapes or import a custom OBJ/STL mesh. Adjust parameters like radius, curvature, or resolution using the sliders.
+## Development
 
-### 2. Choose Smocking Pattern
+Requires Node.js (the CI uses Node 20).
 
-In the center panel, select a pattern from the library. Patterns have different symmetries (N=2, 4, 6) affecting how they tile and fold.
+```bash
+npm install
+npm run dev       # start the Vite dev server
+npm run build     # type-check (tsc -b) and build to dist/
+npm run preview   # serve the production build
+npm run lint      # ESLint
+```
 
-### 3. Adjust Pattern Parameters
-
-- **U/V Repeat**: Control how many times the pattern tiles
-- **Eta Slider**: Animate between open (flat) and closed (smocked) states
-  - eta = 1: Fully open (flat pattern)
-  - eta = 0: Fully closed (stitches merged)
-
-### 4. Run Optimization (Optional)
-
-In the Inspector panel (bottom), adjust optimization weights:
-- **w_shape**: Weight for shape matching energy
-- **w_pleat**: Weight for pleat quality
-- **w_seam**: Weight for seam compatibility
-
-Click "Run Optimization" to find the best tangram configuration.
-
-### 5. Export
-
-Export your design in various formats:
-- **SVG**: Vector graphics for cutting machines
-- **DXF**: CAD format for laser cutters
-- **PDF**: Printable pattern with scale
-- **OBJ/STL**: 3D mesh for visualization
-- **Project (.smock)**: Save full project state
-
-## Pattern Types
-
-| Pattern | Symmetry | Description |
-|---------|----------|-------------|
-| Arrow | N=2 | Classic V-shape pleats |
-| WaterBomb | N=4 | Origami-inspired 4-fold pattern |
-| Resch-4 | N=4 | Ron Resch tessellation |
-| Braid | N=2 | Hexagonal braided effect |
-| Leaf | N=2 | Organic leaf-like formations |
-| Box | N=2 | Square grid box pleats |
-| Brick | N=2 | Diamond/brick offset |
-| Diamond | N=2 | Rhombus diagonal pleats |
-
-## Color Coding
-
-The tangram visualization uses consistent colors:
-- **Blue (#4A90D9)**: Underlay faces
-- **Pink (#E8669A)**: Pleat faces
-- **Yellow (#F5C518)**: Underlay edges
-- **Black (#1A1A1A)**: Stitch lines
-- **Orange (#FF7A00)**: Seam edges (dashed)
-- **Red (#E84040)**: Singularities
-
-## Keyboard Shortcuts
-
-- **I**: Toggle Inspector panel
-- **R**: Reset camera
-- **F**: Fit to view
-
-## Architecture
+Tech: React 19, TypeScript, Vite, Three.js, Zustand, Tailwind CSS v4 (plus d3, jsPDF, mathjs and dxf-parser used by engine/export code).
 
 ```
 src/
-  engine/         # Core computational modules
-    patterns.ts   # Pattern definitions
-    tangram.ts    # Tangram computation
-    shapes.ts     # 3D shape generators
-    curvature.ts  # Curvature computation
-    optimization.ts # Inverse design optimization
-    arap.ts       # ARAP deformation
-    export.ts     # File export utilities
-  store/          # Zustand state management
-  components/     # React components
-    Layout/       # App layout
-    ShapePanel/   # 3D shape editor
-    TangramPanel/ # 2D pattern viewer
-    ResultPanel/  # Result preview
-    InspectorPanel/ # Parameter controls
-    ExportModal/  # Export dialog
-    ui/           # Reusable UI components
-  hooks/          # Custom React hooks
-  types/          # TypeScript definitions
+  components/PatternEditor/  # 2D pattern editor (mounted)
+  components/ResultPanel/    # 3D preview + OBJ export (mounted)
+  components/…               # other panels, currently not mounted
+  engine/                    # patterns, tangram, shapes, curvature, optimization, ARAP, physics, export
+  store/                     # Zustand store
 ```
 
-## References
+## Credits
 
-- Segall, O., et al. (2024). "Fabric Tessellation: Realizing Freeform Surfaces by Smocking." ACM Transactions on Graphics.
+- Aviv Segall, Jing Ren, Amir Vaxman, Olga Sorkine-Hornung. "Fabric Tessellation: Realizing Freeform Surfaces by Smocking." *ACM Transactions on Graphics* 43(4) (SIGGRAPH 2024).
+
+This is an independent student project and is not affiliated with the paper's authors.
+
+## Related repos
+
+- [tpms-kagome-designer](https://github.com/bob-takuya/tpms-kagome-designer) — kagome weaving patterns on TPMS surfaces
+- [bamboo-gridshell](https://github.com/bob-takuya/bamboo-gridshell) — small bamboo gridshell sketch tool
+- [rhinotools](https://github.com/bob-takuya/rhinotools) — RhinoPython scripts for CNC / laser part prep
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues or pull requests.
+MIT — see [LICENSE](LICENSE).
