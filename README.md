@@ -8,7 +8,7 @@ A browser-based tool for drawing smocking stitch patterns and previewing how the
 
 **Prototype.** The pattern editor and 3D preview work and were used for a workshop; much of the larger CAD feature set (target shapes, optimization, multi-format export) exists as engine code but is not connected to the current UI.
 
-- ✅ **Works**
+- **Works**
   - Pattern editor: 7 preset patterns (Arrow, Leaf, Braid, Box, Brick, TwistedSquare, Heart), or draw your own stitch lines on a square or triangular grid
   - Import stitch lines from a DXF file (Draw mode)
   - Tiling: set U/V repeats; in Draw mode the repeat cell can be resized by dragging
@@ -16,18 +16,17 @@ A browser-based tool for drawing smocking stitch patterns and previewing how the
   - Export the preview mesh as OBJ ("Export OBJ" button under the 3D view)
   - Responsive layout: two columns on desktop, Draw / Simulate tabs on mobile
   - `npm run build` succeeds
-- 🚧 **Partial**
+- **Partial**
   - The 3D preview is a *geometric approximation* (Gaussian stitch-pair field, raised-cosine arches, Laplacian smoothing and a short xPBD pass), not a physical cloth simulation and not the paper's optimization
   - Engine modules for target shapes (hemisphere, sphere, torus, hyperboloid, hyperbolic paraboloid, OBJ/STL import), curvature analysis, inverse-design optimization, and SVG / DXF / PDF / STL / project export exist in `src/engine/` and in components (`ShapePanel`, `TangramPanel`, `InspectorPanel`, `ExportModal`, `FabricTestTab`), but these components are **not mounted** in `App.tsx`, so they are not reachable from the UI
   - The optimization's shape energy is simplified (uses a fixed target edge-length ratio instead of the target mesh)
-- 📝 **Not implemented**
+- **Not implemented**
   - File menu: Open Project / Save Project; Edit menu: Undo / Redo / Reset Pattern / Reset Shape; View menu: Reset Camera / Fit to View (menu items exist but do nothing)
   - Keyboard shortcuts
   - The full inverse-design pipeline from the paper (target surface → smocking pattern)
-- ⚠️ **Known issues**
+- **Known issues**
   - The "Export" buttons in the header and the Result panel do nothing (they open an export dialog that is never rendered). Use "Export OBJ" instead
   - `npm run lint` reports several errors (unused variables etc.)
-  - The repository contains a committed `.npm-cache/` directory that should not be there
   - Development continued after the last push; newer work-in-progress exists that isn't pushed yet
 
 ## Demo
@@ -37,7 +36,7 @@ https://bob-takuya.github.io/smocking-cad/
 
 ## Background
 
-Built in spring 2026 as the tool for a smocking workshop held at the a university festival in May 2026. Visitors drew or picked a stitch pattern and checked the gathered shape on screen before sewing. The starting point was the smocking research by Segall et al. (2024); this project implements an interactive pattern-and-preview part, not the paper's full method.
+Built in spring 2026 as the tool for a smocking workshop held at a university festival in May 2026. Visitors drew or picked a stitch pattern and checked the gathered shape on screen before sewing. The starting point was the smocking research by Segall et al. (2024); this project implements an interactive pattern-and-preview part, not the paper's full method.
 
 ## Usage
 
